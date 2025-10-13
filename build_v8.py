@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v6.1 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v6.2 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 - MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -20,7 +20,7 @@ CerebrumLux V8 Build Automation v6.1 (Final Robust MinGW Build - Incorporating a
 - FIX: Added GitHub mirror for 'simdutf' and 'zlib' in DEPS patching to mitigate HTTP 429 rate limit.
 - FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
 - FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
-- FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block that defines GetVisualStudioVersion(), DetectVisualStudioPath() and a pipes module fallback, resolving IndentationError and NameError.
+- FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN REMOVING original GetVisualStudioVersion() and DetectVisualStudioPath() bodies, resolving IndentationError and NameError.
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
 - FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
@@ -271,10 +271,8 @@ def write_gclient_file(root_dir, url):
     log("INFO", f".gclient written to: {path} with name 'v8'.")
 
 def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
-    """Internal helper to aggressively patch vs_toolchain.py so GN exec_script won't raise NameError.
-    This version **prepends** a small shim block at the very top of the file which definitively defines
-    DetectVisualStudioPath and GetVisualStudioVersion and a safe pipes shim. This ensures that when
-    GN runs `python vs_toolchain.py get_toolchain_dir` those functions already exist and avoids IndentationError.
+    """Internal helper to aggressively patch vs_toolchain.py.
+    This version **prepends** a robust shim block, then REMOVES original function bodies.
     """
     try:
         if not vs_toolchain_path.exists():
@@ -285,9 +283,9 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         original_text = text  # keep for comparison
         modified = False
 
-        # Prepare a small shim block to guarantee definitions are present early, at the very top.
+        # Prepare a small top-of-file shim to guarantee definitions are present early.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v6.1) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v6.2) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -311,7 +309,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # If shim already present (idempotence), skip prepending again.
         # Check for the updated shim marker.
-        if "# --- CerebrumLux injected shim START (v6.1) ---" not in text:
+        if "# --- CerebrumLux injected shim START (v6.2) ---" not in text:
             # Prepend shim at the very top of file so it's available immediately on module execution.
             text = shim_block + text
             modified = True
@@ -319,8 +317,20 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         else:
             log("DEBUG", f"CerebrumLux shim already present in '{vs_toolchain_path.name}', skipping prepend.", to_console=False)
 
+        # --- Aggressively REMOVE/COMMENT OUT original function definitions ---
+        # Pattern to find a function definition and its entire body.
+        # This is crucial to prevent IndentationError and NameError.
+        func_body_pattern = r"(def\s+(DetectVisualStudioPath|GetVisualStudioVersion)\s*\([\s\S]*?:\n)(?P<body_content>(?:\s+.*?\n)*?)(?=\n^def|\Z)"
+        
+        # Replace original GetVisualStudioVersion and DetectVisualStudioPath definitions with comments.
+        initial_func_replace_text = text # Store for comparison
+        text = re.sub(func_body_pattern, r"# CerebrumLux neutralized original function: \1# \g<body_content>", text, flags=re.MULTILINE)
+        if initial_func_replace_text != text:
+            modified = True
+            log("INFO", f"Neutralized original DetectVisualStudioPath/GetVisualStudioVersion function bodies in '{vs_toolchain_path.name}'.", to_console=False)
+
+
         # Additionally remove deprecated 'import pipes' occurrences elsewhere to avoid confusion.
-        # This will now check for our shim's comment to prevent re-replacement.
         if "import pipes" in text and not ("# import pipes (replaced by CerebrumLux shim)" in text):
             text = text.replace("import pipes", "# import pipes (replaced by CerebrumLux shim)")
             modified = True
@@ -337,7 +347,6 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             # Backup original to .bak for safety (idempotent, only on first modification)
             try:
                 bak_path = vs_toolchain_path.with_suffix(vs_toolchain_path.suffix + ".cerebrumlux.bak")
-                # Only create backup if it doesn't exist to prevent multiple backups.
                 if not bak_path.exists():
                     bak_path.write_bytes(original_text.encode("utf-8", errors="replace"))
                     log("DEBUG", f"Created backup of original '{vs_toolchain_path.name}' at '{bak_path.name}'.", to_console=False)
@@ -345,18 +354,22 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 log("WARN", f"Could not write backup of '{vs_toolchain_path.name}': {e}", to_console=False)
 
             vs_toolchain_path.write_text(text, encoding="utf-8")
-            log("INFO", f"'{vs_toolchain_path.name}' patched (shim-injected) successfully.", to_console=False)
+            log("INFO", f"'{vs_toolchain_path.name}' patched (shim-injected and originals neutralized) successfully.", to_console=False)
             return True
         else:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             # Final check to ensure the shim is actually present and critical issues are gone.
-            if "# --- CerebrumLux injected shim START (v6.1) ---" not in text: # Check for the updated shim marker
+            if "# --- CerebrumLux injected shim START (v6.2) ---" not in text: # Check for the updated shim marker
                 log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
-            if "import pipes" in text and not ("# import pipes (replaced by CerebrumLux shim)" in text):
+            # Ensure original definitions are actually removed or commented out.
+            if re.search(func_body_pattern, text):
+                log("ERROR", f"'{vs_toolchain_path.name}' still contains original function definitions despite patching. Patching is NOT sticking.", to_console=False)
+                return False
+            if "import pipes" in text and "import pipes (replaced by CerebrumLux shim)" not in text:
                 log("ERROR", f"'{vs_toolchain_path.name}' still contains 'import pipes' but was not replaced. Patching is NOT sticking.", to_console=False)
                 return False
-            if "No supported Visual Studio can be found" in text and not ("# CerebrumLux neutralized original exception" in text):
+            if "No supported Visual Studio can be found" in text and "# CerebrumLux neutralized original exception" not in text:
                 log("ERROR", f"'{vs_toolchain_path.name}' contains VS detection exception but was not neutralized. Patching is NOT sticking.", to_console=False)
                 return False
             
@@ -541,7 +554,7 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 # Check for "import pipes" or the original problematic exception string, AND for our shim
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               "# --- CerebrumLux injected shim START (v6.1) ---" not in content_before_patch) # If our shim isn't there, it needs patching
+                               "# --- CerebrumLux injected shim START (v6.2) ---" not in content_before_patch) # If our shim isn't there, it needs patching
 
                 if not needs_patch:
                     log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim is present. Pre-sync patch skipped (already fine).", to_console=False)
@@ -684,7 +697,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v6.1
+# Auto-generated by CerebrumLux V8 Builder v6.2
 # This portfile directly uses the pre-built V8 library and headers
 # generated by CerebrumLux's custom build script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -754,7 +767,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v6.1 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v6.2 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 

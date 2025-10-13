@@ -1,6 +1,7 @@
-
 # 🧠 CerebrumLux V8 Build Automation
-#     (MinGW Compatible)
+**(MinGW Compatible)**
+
+---
 
 **Version:** 6.0    
 **License:**  
@@ -13,8 +14,10 @@
 ## 🇹🇷 Türkçe Açıklama
 
 ### 🎯 Amaç
-Bu betik, Google V8 JavaScript motorunu **Windows + MinGW** ortamında tamamen otomatik olarak derlemek, yapılandırmak ve **vcpkg** ile bütünleştirmek amacıyla geliştirilmiştir.  
-Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik, MinGW desteğini kazandırarak **Visual Studio gereksinimini ortadan kaldırır**.
+Bu betik, Google V8 JavaScript motorunu **Windows + MinGW** ortamında tamamen otomatik olarak derlemek,
+yapılandırmak ve **vcpkg** ile bütünleştirmek amacıyla geliştirilmiştir.  
+Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik,
+MinGW desteğini kazandırarak **Visual Studio gereksinimini ortadan kaldırır**.
 
 ---
 
@@ -31,13 +34,13 @@ Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik, M
 ---
 
 ### ⚙️ Gereksinimler
-| Bileşen            | Yol Örneği                                                      | Açıklama              |
-| ------------------ | ----------------------------------------------------------------| --------------------- |
-| **Python 3.10+**   | `C:\Users\<user>\AppData\Local\Microsoft\WindowsApps\python.exe`| Ana çalıştırma ortamı |
-| **Git**            | `C:\Program Files\Git\bin`                                      | Kaynak yönetimi       |
-| **MinGW (x86_64)** | `C:\Qt\Tools\mingw1310_64\bin`                                  | Derleyici             |
-| **depot_tools**    | `C:\depot_tools`                                                | V8 kaynak yöneticisi  |
-| **vcpkg**          | `C:\vcpkg`                                                      | C++ paket yöneticisi  |
+| Component          | Example Path                                                     | Description           |
+| ------------------ | ---------------------------------------------------------------- | --------------------- |
+| **Python 3.10+**   | `C:\Users\<user>\AppData\Local\Microsoft\WindowsApps\python.exe` | Ana çalıştırma ortamı |
+| **Git**            | `C:\Program Files\Git\bin`                                       | Kaynak yönetimi       |
+| **MinGW (x86_64)** | `C:\Qt\Tools\mingw1310_64\bin`                                   | Derleyici             |
+| **depot_tools**    | `C:\depot_tools`                                                 | V8 kaynak yöneticisi  |
+| **vcpkg**          | `C:\vcpkg`                                                       | C++ paket yöneticisi  |
 
 ---
 
@@ -89,7 +92,7 @@ Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik, M
     target_include_directories(CerebrumLuxGUI PRIVATE
         "${PROJECT_SRC_DIR}"
         ...
-        "C:/vcpkg/installed/x64-mingw-static/include" # gumbo ve v8 başlık dizinlerini manuel ekle (vcpkg'ye kopyalandı)
+        "C:/vcpkg/installed/x64-mingw-static/include" # v8
     )
 
     target_link_libraries(CerebrumLuxCore PUBLIC
@@ -186,7 +189,7 @@ Normally V8 requires Visual Studio and Clang; this script **eliminates that depe
     target_include_directories(CerebrumLuxGUI PRIVATE
         "${PROJECT_SRC_DIR}"
         ...
-        "C:/vcpkg/installed/x64-mingw-static/include" # gumbo ve v8 başlık dizinlerini manuel ekle (vcpkg'ye kopyalandı)
+        "C:/vcpkg/installed/x64-mingw-static/include" # v8
     )
 
     target_link_libraries(CerebrumLuxCore PUBLIC
