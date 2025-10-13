@@ -1,5 +1,7 @@
 
-# 🧠 CerebrumLux V8 Build Automation (MinGW Compatible)
+# 🧠 CerebrumLux V8 Build Automation
+#     (MinGW Compatible)
+
 **Version:** 6.0    
 **License:**  
 - **CerebrumLux Build Script:** MIT License © 2025 algoritma  
@@ -81,7 +83,7 @@ Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik, M
 
 ---
 
-### ⚠️ CMakeList.txt İçeriği
+### ⚠️ CMakeList.txt
 
     ```bash
     target_include_directories(CerebrumLuxGUI PRIVATE
@@ -178,7 +180,7 @@ Normally V8 requires Visual Studio and Clang; this script **eliminates that depe
 
 ---
 
-### ⚠️ CMakeList.txt İçeriği
+### ⚠️ CMakeList.txt
 
     ```bash
     target_include_directories(CerebrumLuxGUI PRIVATE
