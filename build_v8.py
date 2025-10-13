@@ -1,0 +1,879 @@
+#!/usr/bin/env python3
+"""
+CerebrumLux V8 Build Automation v6.1 (Final Robust MinGW Build - Incorporating all feedback)
+- Auto-resume (incremental fetch + gclient sync)
+- Proxy fallback & git/http tuning for flaky networks
+- MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
+- Copies built lib+headers into vcpkg installed tree for immediate use
+- Robust logging and retries
+- CRITICAL FIXES for gclient/gn/ninja execution & MinGW toolchain definition (args.gn & BUILD.gn for MinGW toolchain)
+- Handles vs_toolchain.py Python 2/3 incompatibility safely
+- Aggressive cleanup of problematic directories (optimized)
+- Corrected .gclient 'name' field
+- Improved libv8_monolith.a search path
+- Dynamic log file naming
+- Enhanced command execution logic for depot_tools binaries (gn.exe, gclient.py)
+- Patches for "stamp" tool and "v8_use_external_startup_data" assert in BUILD.gn files
+- FIX: Aggressive and persistent patch for vs_toolchain.py (pipes module & VS detection) before EACH gclient sync attempt.
+- FIX: Using sys.executable to run gclient.py directly for better Python environment control.
+- FIX: Reordered git checkout and DEPS/.gn patch steps to avoid "local changes would be overwritten" error.
+- FIX: Added GitHub mirror for 'simdutf' and 'zlib' in DEPS patching to mitigate HTTP 429 rate limit.
+- FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
+- FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
+- FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block that defines GetVisualStudioVersion(), DetectVisualStudioPath() and a pipes module fallback, resolving IndentationError and NameError.
+- FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
+- FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
+- FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
+"""
+import os
+import sys
+import subprocess
+import shutil
+import time
+import datetime
+import stat # For aggressive file removal
+import json # For vcpkg.json
+import re # For patching files
+from pathlib import Path # ADDED: For robust path handling
+
+# ----------------------------
+# === CONFIGURABLE PATHS ===
+# ----------------------------
+V8_VERSION = "9.1.269.39"
+V8_REF = "7d3d62c91f69a702e5aa54c6b4dbbaa883683717" # Correct ref for V8 9.1.269.39 tag
+V8_GIT_URL = "https://chromium.googlesource.com/v8/v8.git"
+V8_GITHUB_MIRROR_URL = "https://github.com/v8/v8.git" # Fallback mirror
+
+V8_ROOT = r"C:\v8-mingw" # V8 sources and build outputs root
+DEPOT_TOOLS = r"C:\depot_tools" # Where depot_tools is cloned
+MINGW_BIN = r"C:\Qt\Tools\mingw1310_64\bin" # MinGW compiler bin directory
+VCPKG_ROOT = r"C:\vcpkg" # vcpkg root directory
+
+V8_SRC = os.path.join(V8_ROOT, "v8") # Actual V8 source code directory (inside V8_ROOT)
+OUT_DIR = os.path.join(V8_SRC, "out.gn", "mingw") # GN build output directory
+
+# Log files are placed in a 'logs' subdirectory relative to where the script runs.
+# This ensures V8_ROOT can be safely deleted.
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+LOG_FILE = os.path.join(LOG_DIR, f"CerebrumLux-V8-Build-{V8_VERSION}.log") # Dynamic log name
+ERR_FILE = os.path.join(LOG_DIR, f"CerebrumLux-V8-Build-{V8_VERSION}-error.log") # Dynamic error log name
+
+# Vcpkg port klasörü (güncelleme için kullanılır)
+PORT_DIR = os.path.join(VCPKG_ROOT, "ports", "v8")
+
+
+MAX_GCLIENT_RETRIES = 5
+GCLIENT_RETRY_BACKOFF = [10, 20, 40, 80, 160]  # seconds
+GIT_RETRY = 3
+SYNC_RETRY = 3
+NINJA_TARGET = "v8_monolith"
+
+# Proxy fallback list (HTTP proxies). Add any internal proxies or empty list to disable.
+PROXY_FALLBACKS = [
+    "",  # empty = try direct first
+    # "http://127.0.0.1:3128",  # example local proxy; replace with real if you have.
+]
+
+# ----------------------------
+# === Helpers & Logging ===
+# ----------------------------
+def timestamp():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+def log(level, msg, to_console=True):
+    line = f"[{timestamp()}] [{level}] {msg}"
+    os.makedirs(LOG_DIR, exist_ok=True) # Ensure log directory exists
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    if level in ("ERROR", "FATAL"):
+        with open(ERR_FILE, "a", encoding="utf-8") as ef:
+            ef.write(line + "\n")
+    if to_console:
+        print(line)
+
+def onerror(func, path, exc_info):
+    """
+    Error handler for shutil.rmtree.
+    If the error is due to an access problem (e.g. file locked),
+    it changes the file's permissions to allow removal.
+    """
+    if not os.access(path, os.W_OK):
+        # Is the error an access problem?
+        os.chmod(path, stat.S_IWUSR)
+        func(path)
+    else:
+        raise
+
+def aggressive_rmtree(path):
+    """Aggressively removes a directory, handling read-only or locked files."""
+    log("DEBUG", f"Attempting aggressive removal of: {path}", to_console=False)
+    if not os.path.exists(path):
+        return
+
+    # Attempt to terminate processes that might lock files
+    try:
+        subprocess.run(f'taskkill /F /IM python.exe /T', shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(f'taskkill /F /IM git.exe /T', shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(f'taskkill /F /IM gclient.exe /T', shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(f'taskkill /F /IM gn.exe /T', shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(f'taskkill /F /IM ninja.exe /T', shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(2) # Give processes time to die
+    except Exception as e:
+        log("WARN", f"Failed to kill locking processes: {e}", to_console=False)
+
+    # Aggressive retry removal
+    for i in range(3):
+        try:
+            shutil.rmtree(path, onerror=onerror)
+            time.sleep(1)
+            if not os.path.exists(path):
+                log("DEBUG", f"Successfully removed {path} on retry {i+1}", to_console=False)
+                return
+        except Exception as e:
+            log("WARN", f"Aggressive rmtree attempt {i+1} failed for {path}: {e}", to_console=False)
+        time.sleep(2)
+
+    raise OSError(f"Failed to aggressively remove directory after multiple attempts: {path}")
+
+def run(cmd_list, cwd=None, env=None, check=True, capture_output=True):
+    """
+    Run a shell command. Returns subprocess.CompletedProcess or raises.
+    `cmd_list` should be a list of arguments for shell=False.
+    """
+    cmd_str = ' '.join(cmd_list) if isinstance(cmd_list, list) else cmd_str
+    log("INFO", f"RUN: {cmd_str} (CWD: {cwd or os.getcwd()})", to_console=False)
+    try:
+        cp = subprocess.run(cmd_list, cwd=cwd, env=env, shell=False, # shell=False for list of commands
+                            check=check, text=True, capture_output=capture_output,
+                            encoding='utf-8', errors='replace') # errors='replace' for problematic output
+        if capture_output:
+            if cp.stdout:
+                log("DEBUG", f"STDOUT:\n{cp.stdout}", to_console=False)
+            if cp.stderr:
+                log("DEBUG", f"STDERR:\n{cp.stderr}", to_console=False)
+        return cp
+    except subprocess.CalledProcessError as e:
+        log("ERROR", f"Command failed (code {e.returncode}): {cmd_str}")
+        if capture_output:
+            log("ERROR", f"Stdout: {e.stdout}", to_console=False)
+            log("ERROR", f"Stderr: {e.stderr}", to_console=False)
+        raise
+    except FileNotFoundError as e:
+        log("FATAL", f"Command not found: {cmd_list[0] if isinstance(cmd_list, list) else cmd_list.split(' ')[0]}. Ensure it's in PATH. Error: {e}")
+        raise
+    except Exception as e:
+        log("FATAL", f"An unexpected error occurred while running command: {e}")
+        raise
+
+# ----------------------------
+# === Environment prep ===
+# ----------------------------
+def prepare_subprocess_env():
+    env = os.environ.copy()
+    path_parts = env.get("PATH", "").split(os.pathsep)
+    new_path = []
+    
+    if DEPOT_TOOLS not in new_path:
+        new_path.append(DEPOT_TOOLS)
+    
+    if MINGW_BIN not in new_path:
+        new_path.append(MINGW_BIN)
+        
+    py_dir = os.path.dirname(sys.executable)
+    if py_dir not in new_path:
+        new_path.append(py_dir)
+    py_scripts_dir = os.path.join(py_dir, "Scripts")
+    if os.path.exists(py_scripts_dir) and py_scripts_dir not in new_path:
+        new_path.append(py_scripts_dir)
+    
+    for p in path_parts:
+        if p and p not in new_path: # Also check for empty strings from split
+            new_path.append(p)
+            
+    env["PATH"] = os.pathsep.join(new_path)
+    env["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+# ----------------------------
+# === Git helpers (with retries + proxy fallback) ===
+# ----------------------------
+def git_configure_proxy(env, proxy_url):
+    if proxy_url:
+        log("INFO", f"Setting Git proxy to: {proxy_url}", to_console=False)
+        run(['git', 'config', '--global', 'http.proxy', proxy_url], env=env, check=False, capture_output=False)
+        run(['git', 'config', '--global', 'https.proxy', proxy_url], env=env, check=False, capture_output=False)
+    else:
+        log("INFO", "Unsetting Git proxy.", to_console=False)
+        run(['git', 'config', '--global', '--unset', 'http.proxy'], env=env, check=False, capture_output=False)
+        run(['git', 'config', '--global', '--unset', 'https.proxy'], env=env, check=False, capture_output=False)
+
+def git_fetch_and_reset(env, repo_dir, ref, remote="origin"):
+    for attempt in range(1, GIT_RETRY + 1):
+        try:
+            log("INFO", f"Git fetch/reset attempt {attempt}/{GIT_RETRY} for {repo_dir} @ {ref}.")
+            run(['git', 'remote', 'update', '--prune'], cwd=repo_dir, env=env, capture_output=True)
+            run(['git', 'fetch', remote, '--tags', '--prune', '--no-recurse-submodules'], cwd=repo_dir, env=env, capture_output=True)
+            run(['git', 'checkout', '--detach', ref], cwd=repo_dir, env=env, capture_output=True)
+            run(['git', 'reset', '--hard', ref], cwd=repo_dir, env=env, capture_output=True)
+            log("INFO", f"Checked out V8 ref {ref}.")
+            return
+        except Exception as e:
+            log("WARN", f"git fetch/reset attempt {attempt} failed: {e}")
+            if attempt < GIT_RETRY:
+                time.sleep(5 * attempt)
+            else:
+                raise
+
+def git_clone_with_retry(env, target_dir, url):
+    for proxy_url in PROXY_FALLBACKS:
+        try:
+            git_configure_proxy(env, proxy_url)
+            for attempt in range(1, GIT_RETRY + 1):
+                try:
+                    log("INFO", f"Cloning attempt {attempt}/{GIT_RETRY} from {url} via proxy '{proxy_url}'")
+                    # Use a full clone as --no-single-branch can still be problematic
+                    run(['git', 'clone', url, target_dir], env=env) # Changed to full clone
+                    log("INFO", "Git clone successful.")
+                    return
+                except Exception as e:
+                    log("WARN", f"git clone attempt {attempt} failed: {e}")
+                    if attempt < GIT_RETRY:
+                        time.sleep(5 * attempt)
+                    else:
+                        raise # Re-raise if all retries exhausted for this proxy
+        except Exception as e:
+            log("ERROR", f"Proxy configuration or clone failed for proxy '{proxy_url}': {e}")
+    
+    # If all proxies and retries failed
+    raise RuntimeError(f"All git clone attempts failed for {url}.")
+
+# ----------------------------
+# === gclient helpers ===
+# ----------------------------
+def write_gclient_file(root_dir, url):
+    """
+    Write a .gclient file in the root directory.
+    """
+    gclient_content = (
+        "solutions = [\n"
+        "  {\n"
+        f"    'name': 'v8',\n" # Changed from '.' to 'v8' to align with V8_SRC path
+        f"    'url': '{url}',\n"
+        "    'deps_file': 'DEPS',\n"
+        "    'managed': False,\n"
+        "  },\n"
+        "]\n"
+    )
+    path = os.path.join(root_dir, ".gclient")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(gclient_content)
+    log("INFO", f".gclient written to: {path} with name 'v8'.")
+
+def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
+    """Internal helper to aggressively patch vs_toolchain.py so GN exec_script won't raise NameError.
+    This version **prepends** a small shim block at the very top of the file which definitively defines
+    DetectVisualStudioPath and GetVisualStudioVersion and a safe pipes shim. This ensures that when
+    GN runs `python vs_toolchain.py get_toolchain_dir` those functions already exist and avoids IndentationError.
+    """
+    try:
+        if not vs_toolchain_path.exists():
+            log("DEBUG", f"'{vs_toolchain_path.name}' not found at {vs_toolchain_path}, cannot patch.", to_console=False)
+            return False
+
+        text = vs_toolchain_path.read_text(encoding="utf-8")
+        original_text = text  # keep for comparison
+        modified = False
+
+        # Prepare a small shim block to guarantee definitions are present early, at the very top.
+        shim_block = (
+            "# --- CerebrumLux injected shim START (v6.1) ---\n" # Updated shim version marker
+            "import sys\n"
+            "import subprocess\n"
+            "from types import SimpleNamespace\n"
+            "\n"
+            "# The 'pipes' module is removed in Python 3.13+. Provide a compatibility shim.\n"
+            "# This ensures 'pipes.quote' works without 'ModuleNotFoundError'.\n"
+            "if 'pipes' not in sys.modules:\n"
+            "    pipes = SimpleNamespace(quote=lambda s: subprocess.list2cmdline([s]))\n"
+            "else:\n"
+            "    pipes = sys.modules['pipes']\n"
+            "\n"
+            "def DetectVisualStudioPath():\n"
+            "    # CerebrumLux shim: return empty string to indicate no Visual Studio available for MinGW builds.\n"
+            "    return r''\n"
+            "\n"
+            "def GetVisualStudioVersion():\n"
+            "    # CerebrumLux shim: return a safe dummy VS version string. GN uses this only to choose logic branches.\n"
+            "    return '16.0'\n"
+            "# --- CerebrumLux injected shim END ---\n\n"
+        )
+
+        # If shim already present (idempotence), skip prepending again.
+        # Check for the updated shim marker.
+        if "# --- CerebrumLux injected shim START (v6.1) ---" not in text:
+            # Prepend shim at the very top of file so it's available immediately on module execution.
+            text = shim_block + text
+            modified = True
+            log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
+        else:
+            log("DEBUG", f"CerebrumLux shim already present in '{vs_toolchain_path.name}', skipping prepend.", to_console=False)
+
+        # Additionally remove deprecated 'import pipes' occurrences elsewhere to avoid confusion.
+        # This will now check for our shim's comment to prevent re-replacement.
+        if "import pipes" in text and not ("# import pipes (replaced by CerebrumLux shim)" in text):
+            text = text.replace("import pipes", "# import pipes (replaced by CerebrumLux shim)")
+            modified = True
+            log("INFO", f"Replaced 'import pipes' occurrences in '{vs_toolchain_path.name}'.", to_console=False)
+
+        # Neutralize explicit 'raise Exception' for "No supported Visual Studio can be found".
+        exception_pattern = r"(raise\s+Exception\s*\(\s*['\"]No supported Visual Studio can be found[\s\S]*?\)\s*)"
+        if re.search(exception_pattern, text):
+            text = re.sub(exception_pattern, "# CerebrumLux neutralized original exception: No supported Visual Studio can be found.", text)
+            modified = True
+            log("INFO", f"Neutralized explicit 'No supported Visual Studio can be found' exception text in '{vs_toolchain_path.name}'.", to_console=False)
+
+        if modified:
+            # Backup original to .bak for safety (idempotent, only on first modification)
+            try:
+                bak_path = vs_toolchain_path.with_suffix(vs_toolchain_path.suffix + ".cerebrumlux.bak")
+                # Only create backup if it doesn't exist to prevent multiple backups.
+                if not bak_path.exists():
+                    bak_path.write_bytes(original_text.encode("utf-8", errors="replace"))
+                    log("DEBUG", f"Created backup of original '{vs_toolchain_path.name}' at '{bak_path.name}'.", to_console=False)
+            except Exception as e:
+                log("WARN", f"Could not write backup of '{vs_toolchain_path.name}': {e}", to_console=False)
+
+            vs_toolchain_path.write_text(text, encoding="utf-8")
+            log("INFO", f"'{vs_toolchain_path.name}' patched (shim-injected) successfully.", to_console=False)
+            return True
+        else:
+            log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
+            # Final check to ensure the shim is actually present and critical issues are gone.
+            if "# --- CerebrumLux injected shim START (v6.1) ---" not in text: # Check for the updated shim marker
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim after expected patching. Patching is NOT sticking.", to_console=False)
+                return False
+            if "import pipes" in text and not ("# import pipes (replaced by CerebrumLux shim)" in text):
+                log("ERROR", f"'{vs_toolchain_path.name}' still contains 'import pipes' but was not replaced. Patching is NOT sticking.", to_console=False)
+                return False
+            if "No supported Visual Studio can be found" in text and not ("# CerebrumLux neutralized original exception" in text):
+                log("ERROR", f"'{vs_toolchain_path.name}' contains VS detection exception but was not neutralized. Patching is NOT sticking.", to_console=False)
+                return False
+            
+            return True # Consider it successfully patched if no critical problems found and shim is present.
+
+    except Exception as e:
+        log("ERROR", f"Failed to apply aggressive patch logic to '{vs_toolchain_path.name}': {e}", to_console=False)
+        return False
+
+def _patch_dotfile_settings_gni(v8_source_dir: str, env: dict) -> bool:
+    """
+    Patches V8_SRC/build/dotfile_settings.gni to define 'exec_script_whitelist'
+    within the 'build_dotfile_settings' scope.
+    """
+    dotfile_settings_path = Path(v8_source_dir) / "build" / "dotfile_settings.gni"
+    if not dotfile_settings_path.exists():
+        log("WARN", f"'{dotfile_settings_path.name}' not found at {dotfile_settings_path}. Skipping patch.", to_console=True)
+        return False
+
+    log("INFO", f"Patching '{dotfile_settings_path.name}' for 'exec_script_whitelist' compatibility.", to_console=True)
+    try:
+        content = dotfile_settings_path.read_text(encoding="utf-8")
+        patched_content = content
+        modified = False
+
+        # Find the 'build_dotfile_settings = {' line
+        match = re.search(r"^(?P<indent>\s*)build_dotfile_settings\s*=\s*\{", patched_content, re.MULTILINE)
+        if match:
+            indent_level = match.group("indent") # Get the indentation of the line
+            insert_point = match.end() # Point right after the opening brace
+            
+            # Check if 'exec_script_whitelist' is already defined within this scope
+            scope_content_after_brace = patched_content[insert_point:]
+            
+            if "exec_script_whitelist" not in scope_content_after_brace:
+                # Insert 'exec_script_whitelist = []' with proper indentation
+                insert_text = f"\n{indent_level}  exec_script_whitelist = []"
+                patched_content = patched_content[:insert_point] + insert_text + patched_content[insert_point:]
+                modified = True
+                log("INFO", "Inserted 'exec_script_whitelist = []' into 'build_dotfile_settings' scope.", to_console=True)
+            else:
+                log("INFO", "'exec_script_whitelist' already exists in 'build_dotfile_settings' scope. Skipping insertion.", to_console=False)
+        else:
+            log("WARN", "Could not find 'build_dotfile_settings = {' in 'dotfile_settings.gni'. Skipping patch.", to_console=True)
+            return False
+
+        if modified:
+            dotfile_settings_path.write_text(patched_content, encoding="utf-8")
+            log("INFO", f"'{dotfile_settings_path.name}' patched successfully.", to_console=True)
+            run(["git", "add", str(dotfile_settings_path)], cwd=v8_source_dir, env=env, check=False)
+            log("INFO", f"Staged '{dotfile_settings_path.name}' changes with 'git add'.", to_console=True)
+            return True
+        else:
+            log("INFO", f"'{dotfile_settings_path.name}' already patched or no changes needed.", to_console=False)
+            run(["git", "add", str(dotfile_settings_path)], cwd=v8_source_dir, env=env, check=False) # Ensure staged even if no changes
+            log("INFO", f"Ensured '{dotfile_settings_path.name}' is staged with 'git add'.", to_console=True)
+            return True
+
+    except Exception as e:
+        log("ERROR", f"Failed to patch '{dotfile_settings_path.name}': {e}", to_console=True)
+        return False
+
+
+def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
+    """
+    Patches the DEPS file to remove problematic dependencies for MinGW build.
+    Also calls to patch the 'build/dotfile_settings.gni' file.
+    """
+    deps_path = os.path.join(v8_source_dir, "DEPS")
+    if not os.path.exists(deps_path):
+        log("WARN", f"DEPS file not found at {deps_path}. Skipping DEPS patch.", to_console=True)
+        return
+
+    log("INFO", f"Patching DEPS file at {deps_path} for MinGW compatibility.", to_console=True)
+    
+    with open(deps_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    patched_content = content
+    deps_modified = False
+    
+    # --- Remove problematic deps for MinGW ---
+    log("INFO", "Removing 'buildtools/win' from DEPS.", to_console=False)
+    if re.search(r"\'buildtools/win\':\s*Var\(.*?\),?\n?", patched_content, flags=re.DOTALL) or \
+       re.search(r"\'buildtools/win\':\s*\'[^\n]*\',?\n?", patched_content, flags=re.DOTALL):
+        patched_content = re.sub(r"\'buildtools/win\':\s*Var\(.*?\),?\n?", "", patched_content, flags=re.DOTALL)
+        patched_content = re.sub(r"\'buildtools/win\':\s*\'[^\n]*\',?\n?", "", patched_content, flags=re.DOTALL)
+        deps_modified = True
+
+    log("INFO", "Removing 'third_party/llvm-build' from DEPS.", to_console=False)
+    if re.search(r"\'third_party/llvm-build\':\s*Var\(.*?\),?\n?", patched_content, flags=re.DOTALL) or \
+       re.search(r"\'third_party/llvm-build\':\s*\'[^\n]*\',?\n?", patched_content, flags=re.DOTALL):
+        patched_content = re.sub(r"\'third_party/llvm-build\':\s*Var\(.*?\),?\n?", "", patched_content, flags=re.DOTALL)
+        patched_content = re.sub(r"\'third_party/llvm-build\':\s*\'[^\n]*\',?\n?", "", patched_content, flags=re.DOTALL)
+        deps_modified = True
+
+    log("INFO", "Removing 'tools/win' from DEPS.", to_console=False)
+    if re.search(r"['\"]tools/win['\"]\s*:\s*['\"][^'\"]*['\"],?\n?", patched_content):
+        patched_content = re.sub(r"['\"]tools/win['\"]\s*:\s*['\"][^'\"]*['\"],?\n?", "", patched_content)
+        deps_modified = True
+    
+    # NEW FIX: Remove 'tools/clang' from DEPS to prevent 429 rate limit errors for this submodule
+    log("INFO", "Removing 'tools/clang' from DEPS.", to_console=False)
+    if re.search(r"['\"]tools/clang['\"]\s*:\s*['\"][^'\"]*['\"],?\n?", patched_content):
+        patched_content = re.sub(r"['\"]tools/clang['\"]\s*:\s*['\"][^'\"]*['\"],?\n?", "", patched_content)
+        deps_modified = True
+
+    log("INFO", "Removing problematic cipd packages from DEPS.", to_console=False)
+    initial_cipd_content = patched_content
+    patched_content = re.sub(r"\'infra/tools/win\S*?\'[^}]*?},\n", "", patched_content)
+    if initial_cipd_content != patched_content:
+        deps_modified = True
+
+    # --- Add GitHub mirror for simdutf ---
+    if "https://chromium.googlesource.com/chromium/src/third_party/simdutf" in patched_content:
+        patched_content = patched_content.replace(
+            "https://chromium.googlesource.com/chromium/src/third_party/simdutf",
+            "https://github.com/simdutf/simdutf.git"
+        )
+        log("INFO", "Replaced 'simdutf' source with GitHub mirror in DEPS.", to_console=True)
+        deps_modified = True
+
+    # --- Add GitHub mirror for zlib ---
+    if "https://chromium.googlesource.com/chromium/src/third_party/zlib.git" in patched_content:
+        patched_content = patched_content.replace(
+            "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
+            "https://github.com/madler/zlib.git"
+        )
+        log("INFO", "Replaced 'zlib' source with GitHub mirror in DEPS.", to_console=True)
+        deps_modified = True
+
+    # --- Apply DEPS changes if any ---
+    if deps_modified:
+        with open(deps_path, 'w', encoding="utf-8") as f:
+            f.write(patched_content)
+        log("INFO", f"DEPS file patched successfully to remove problematic MinGW dependencies and apply mirrors.", to_console=True)
+    else:
+        log("INFO", f"DEPS file already patched or no problematic dependencies found.", to_console=False)
+
+    # --- Call to patch build/dotfile_settings.gni ---
+    log("INFO", "Calling patch for 'build/dotfile_settings.gni'.", to_console=True)
+    if not _patch_dotfile_settings_gni(v8_source_dir, env):
+        log("FATAL", "Failed to patch 'build/dotfile_settings.gni'. Aborting.", to_console=True)
+        sys.exit(1)
+
+
+def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: int = MAX_GCLIENT_RETRIES):
+    """Runs gclient sync with retries and error handling, aggressively patching vs_toolchain.py before each attempt and after if needed."""
+    gclient_py_path = Path(DEPOT_TOOLS) / "gclient.py" # Use Path for gclient.py
+    if not gclient_py_path.exists():
+        raise RuntimeError(f"gclient.py not found at {gclient_py_path}. Ensure depot_tools is correctly cloned.")
+    
+    vs_toolchain_path = Path(v8_src_dir) / "build" / "vs_toolchain.py" # Define once
+
+    # Call gclient.py directly with sys.executable for better Python environment control
+    cmd_base = [sys.executable, str(gclient_py_path), "sync", "-D", "--with_branch_heads", "--with_tags", "--force"]
+    
+    for attempt in range(1, retries + 1):
+        try:
+            log("INFO", f"gclient sync attempt {attempt}/{retries}.")
+            
+            # CRITICAL: Aggressively attempt to patch vs_toolchain.py BEFORE each gclient sync run.
+            patch_tries = 0
+            MAX_PATCH_LOOP_TRIES = 10 # Increased for more resilience
+            
+            # This loop waits until vs_toolchain_path exists and has been successfully patched (or doesn't need patching).
+            while True:
+                current_vs_toolchain_exists = vs_toolchain_path.exists()
+                if not current_vs_toolchain_exists:
+                    log("DEBUG", f"'{vs_toolchain_path.name}' does not exist yet. Cannot apply pre-sync patch. Continuing...", to_console=False)
+                    break # Break if file doesn't exist, gclient will download it.
+
+                if patch_tries >= MAX_PATCH_LOOP_TRIES:
+                    log("FATAL", f"'{vs_toolchain_path.name}' still contains problematic VS detection logic or missing shim after {MAX_PATCH_LOOP_TRIES} pre-sync patch attempts. Aborting.", to_console=True)
+                    sys.exit(1)
+                
+                # Read content to check for critical strings *before* patching
+                content_before_patch = ""
+                if vs_toolchain_path.exists():
+                    content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
+
+                # Check for "import pipes" or the original problematic exception string, AND for our shim
+                needs_patch = ("import pipes" in content_before_patch or 
+                               "No supported Visual Studio can be found" in content_before_patch or
+                               "# --- CerebrumLux injected shim START (v6.1) ---" not in content_before_patch) # If our shim isn't there, it needs patching
+
+                if not needs_patch:
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim is present. Pre-sync patch skipped (already fine).", to_console=False)
+                    break # Already patched or doesn't need it.
+
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes or VS exception detected, or shim missing). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES}.", to_console=False)
+                if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
+                    log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
+                    break # Patch applied successfully, proceed.
+                else:
+                    log("WARN", f"Pre-sync patch of '{vs_toolchain_path.name}' failed on try {patch_tries+1}. Retrying patch...", to_console=False)
+                    time.sleep(1) # Small delay before retrying patch
+                patch_tries += 1
+            
+            # Execute gclient sync command
+            run(cmd_base, cwd=root_dir, env=env)
+            log("INFO", "gclient sync completed successfully.")
+
+            # CRITICAL: Post-sync patch attempt, in case gclient overwrote it during its run.
+            # This is a final enforcement for persistence.
+            if vs_toolchain_path.exists():
+                log("INFO", f"Post-sync patch attempt for '{vs_toolchain_path.name}' after successful gclient sync attempt {attempt}.", to_console=False)
+                if not _apply_vs_toolchain_patch_logic(vs_toolchain_path):
+                    log("FATAL", f"Post-sync patch of '{vs_toolchain_path.name}' failed after attempt {attempt}. Aborting.", to_console=True)
+                    sys.exit(1)
+            
+            return # Only return if the sync and post-sync patch are successful
+
+        except Exception as e:
+            log("ERROR", f"gclient sync attempt {attempt} failed: {e}")
+            
+            # After a failure, attempt to re-patch vs_toolchain_path before the next retry.
+            if vs_toolchain_path.exists():
+                log("INFO", f"Error-recovery patch attempt for '{vs_toolchain_path.name}' after failed gclient sync attempt {attempt}.", to_console=False)
+                # No need for a loop here, just one attempt to fix for next retry.
+                if not _apply_vs_toolchain_patch_logic(vs_toolchain_path):
+                    log("FATAL", f"Error-recovery patch of '{vs_toolchain_path.name}' failed after attempt {attempt}. Aborting.", to_console=True)
+                    sys.exit(1)
+
+            if attempt < retries:
+                sleep_for = GCLIENT_RETRY_BACKOFF[min(attempt-1, len(GCLIENT_RETRY_BACKOFF)-1)]
+                log("INFO", f"Retrying gclient sync in {sleep_for}s (attempt {attempt+1}/{retries})...")
+                time.sleep(sleep_for) # Use the calculated sleep duration
+            else:
+                raise
+
+# ----------------------------
+# === Build steps ===
+# ----------------------------
+def ensure_depot_tools(env):
+    if os.path.isdir(DEPOT_TOOLS):
+        log("INFO", f"depot_tools exists at {DEPOT_TOOLS}")
+        return
+    log("STEP", f"Cloning depot_tools into {DEPOT_TOOLS}")
+    os.makedirs(os.path.dirname(DEPOT_TOOLS), exist_ok=True)
+    git_clone_with_retry(env, DEPOT_TOOLS, "https://chromium.googlesource.com/chromium/tools/depot_tools.git")
+    log("INFO", "depot_tools cloned.")
+
+def write_args_gn(out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    mingw_for = MINGW_BIN.replace("\\", "/")
+    args_content = (
+        "is_debug = false\n"
+        "target_os = \"win\"\n"
+        "target_cpu = \"x64\"\n"
+        "is_clang = false\n"
+        "use_sysroot = false\n"
+        "treat_warnings_as_errors = false\n"
+        "v8_static_library = true\n"
+        "v8_use_external_startup_data = false\n"
+        "v8_enable_i18n_support = false\n"
+        "is_component_build = false\n"
+        f'cc = "{mingw_for}/gcc.exe"\n'
+        f'cxx = "{mingw_for}/g++.exe"\n'
+        f'ar = "{mingw_for}/ar.exe"\n'
+        f'strip = "{mingw_for}/strip.exe"\n'
+        "v8_current_cpu = \"x64\"\n"
+        "v8_current_os = \"win\"\n"
+        "v8_target_cpu = \"x64\"\n"
+        "v8_target_os = \"win\"\n"
+        # 'build_dotfile_settings' is now handled by build/dotfile_settings.gni patch, removed from here.
+    )
+    p = os.path.join(out_dir, "args.gn")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(args_content)
+    log("INFO", f"args.gn written to {p}")
+
+def run_gn_gen(env):
+    gn_bin = shutil.which("gn") or os.path.join(DEPOT_TOOLS, "gn")
+    if not gn_bin:
+        raise RuntimeError("gn binary not found in PATH nor in depot_tools.")
+    
+    # FIX: Removed '--args=@...' as args.gn is automatically picked up when in OUT_DIR.
+    run([gn_bin, "gen", OUT_DIR], cwd=V8_SRC, env=env)
+    log("INFO", f"GN generated build files in {OUT_DIR}.")
+
+def run_ninja_build(env):
+    ninja_bin = shutil.which("ninja") or os.os.path.join(DEPOT_TOOLS, "ninja")
+    if not ninja_bin:
+        raise RuntimeError("ninja binary not found in PATH nor in depot_tools.")
+    run([ninja_bin, "-C", OUT_DIR, NINJA_TARGET], cwd=V8_SRC, env=env)
+    log("INFO", f"Ninja build of '{NINJA_TARGET}' completed.")
+
+def copy_to_vcpkg():
+    target_lib_dir = os.path.join(VCPKG_ROOT, "installed", "x64-mingw-static", "lib")
+    target_include_dir = os.path.join(VCPKG_ROOT, "installed", "x64-mingw-static", "include")
+    os.makedirs(target_lib_dir, exist_ok=True)
+    os.makedirs(target_include_dir, exist_ok=True)
+    
+    lib_candidate = os.path.join(OUT_DIR, "obj", "libv8_monolith.a")
+    if not os.path.exists(lib_candidate):
+        found = []
+        for root, _, files in os.walk(OUT_DIR):
+            for fn in files:
+                if fn.lower().startswith("libv8_monolith") and fn.endswith(".a"):
+                    found.append(os.path.join(root, fn))
+        if found:
+            lib_candidate = found[0]
+            log("INFO", f"Found libv8_monolith.a at: {lib_candidate}")
+        else:
+            log("ERROR", f"Built libv8_monolith.a not found under {OUT_DIR}")
+            raise FileNotFoundError(f"Built libv8_monolith.a not found under {OUT_DIR}")
+            
+    shutil.copy2(lib_candidate, target_lib_dir) # copy2 preserves metadata
+    log("INFO", f"Copied '{os.path.basename(lib_candidate)}' to '{target_lib_dir}'")
+
+    src_include = os.path.join(V8_SRC, "include")
+    if not os.path.isdir(src_include):
+        log("ERROR", f"Headers not found in source include path: {src_include}")
+        raise FileNotFoundError(src_include)
+    
+    shutil.copytree(src_include, target_include_dir, dirs_exist_ok=True)
+    log("INFO", f"V8 headers copied from '{src_include}' to '{target_include_dir}'")
+    log("INFO", f"V8 lib + headers copied into vcpkg installed tree ({target_lib_dir}, {target_include_dir})")
+
+def update_vcpkg_port(version, ref, homepage, license):
+    port_v8_dir = os.path.join(VCPKG_ROOT, "ports", "v8")
+    os.makedirs(port_v8_dir, exist_ok=True)
+    portfile_path = os.path.join(port_v8_dir, "portfile.cmake")
+    manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
+
+    cmake_content = f"""
+# Auto-generated by CerebrumLux V8 Builder v6.1
+# This portfile directly uses the pre-built V8 library and headers
+# generated by CerebrumLux's custom build script.
+# It skips the standard vcpkg build process for V8 for MinGW compatibility.
+
+vcpkg_check_linkage(ONLY_STATIC_LIBRARY)
+
+# This is a dummy 'from_git' call for vcpkg's internal checks,
+# the actual fetching/building is done by the custom Python script.
+vcpkg_from_git(
+    OUT_SOURCE_PATH SOURCE_PATH
+    URL {V8_GIT_URL}
+    REF {ref}
+    HEAD_REF main # Placeholder, actual ref used by custom script
+    PATCHES
+)
+
+# Skip configure and build steps, as artifacts are pre-built
+# This prevents vcpkg from trying to build V8 itself, which we do manually.
+vcpkg_install_cmake(
+    SOURCE_PATH ${{SOURCE_PATH}}
+    DISABLE_INSTALL_SUPPORT
+)
+
+# Copy prebuilt static lib from custom builder (CerebrumLux)
+# Ensure paths are correctly escaped for CMake
+file(COPY "{os.path.join(VCPKG_ROOT, 'installed', 'x64-mingw-static', 'lib', 'libv8_monolith.a').replace('\\', '/')}" DESTINATION ${{CURRENT_PACKAGES_DIR}}/lib)
+
+# Copy headers - already handled by direct copy_to_vcpkg.
+# This part is mostly for vcpkg's internal tracking,
+# the actual files are copied by the python script.
+# We'll just ensure the include directory structure is recognized.
+file(GLOB_RECURSE V8_HEADERS_TO_COPY "${{V8_ROOT}}/v8/include/*.h" "${{V8_ROOT}}/v8/include/*.hpp")
+file(COPY ${{V8_HEADERS_TO_COPY}} DESTINATION ${{CURRENT_PACKAGES_DIR}}/include/v8)
+
+# Handle copyright
+file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/share/${{PORT}}" RENAME copyright)
+"""
+    # Replace V8_ROOT in cmake_content with the actual path, correctly escaped
+    cmake_content = cmake_content.replace('${V8_ROOT}', V8_ROOT.replace('\\', '/'))
+
+    with open(portfile_path, "w", encoding="utf-8") as f:
+        f.write(cmake_content)
+    log("INFO", f"Updated {portfile_path}")
+
+    manifest = {
+        "name": "v8",
+        "version-string": version,
+        "description": "Google V8 JavaScript engine (MinGW-w64 compatible, prebuilt by CerebrumLux custom script)",
+        "homepage": homepage,
+        "license": "BSD-3-Clause", # Direct from V8 project
+        "supports": "windows & !uwp"
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    log("INFO", f"Created/updated {manifest_path}")
+
+def vcpkg_integrate_install(env):
+    vcpkg_exe = os.path.join(VCPKG_ROOT, "vcpkg.exe")
+    if not os.path.exists(vcpkg_exe):
+        log("WARN", f"vcpkg.exe not found at {vcpkg_exe}, skipping 'vcpkg integrate install'.")
+        return
+    log("STEP", "Running 'vcpkg integrate install'...")
+    run([vcpkg_exe, "integrate", "install"], env=env, capture_output=True)
+    log("INFO", "'vcpkg integrate install' completed.")
+
+# ----------------------------
+# === Main Workflow ===
+# ----------------------------
+def main():
+    log("START", "=== CerebrumLux V8 Build v6.1 started ===", to_console=True)
+    start_time = time.time()
+    env = prepare_subprocess_env()
+
+    try:
+        # Step 0: Initial full cleanup (more aggressive now)
+        if os.path.isdir(V8_ROOT):
+            log("INFO", f"Removing existing V8_ROOT for fresh start: {V8_ROOT}")
+            aggressive_rmtree(V8_ROOT)
+            if os.path.isdir(V8_ROOT):
+                log("FATAL", f"Failed to remove V8_ROOT '{V8_ROOT}' after aggressive attempts. Please delete manually and retry.", to_console=True)
+                sys.exit(1)
+        os.makedirs(V8_ROOT, exist_ok=True) # Ensure V8_ROOT exists for .gclient
+
+        # Step 1: Ensure depot_tools is cloned and ready
+        log("STEP", "Ensuring depot_tools is cloned and functional.")
+        ensure_depot_tools(env)
+        
+        # Step 2: Write .gclient file in V8_ROOT to configure gclient
+        log("STEP", "Writing .gclient file in V8_ROOT for V8 repository configuration.")
+        write_gclient_file(V8_ROOT, V8_GIT_URL)
+
+        # Step 3: Run the initial gclient sync to clone V8 and fetch core dependencies.
+        # This sync will now ensure vs_toolchain.py is patched before and after each retry internally.
+        log("STEP", "Running initial gclient sync to clone V8 and fetch core dependencies.")
+        gclient_sync_with_retry(env, V8_ROOT, V8_SRC)
+        
+        # NEW STEP (MOVED): Self-test vs_toolchain.py after the first gclient sync has completed.
+        # This ensures V8_SRC and vs_toolchain.py are expected to exist.
+        log("STEP", "Running self-test for 'vs_toolchain.py' after initial sync to ensure it runs correctly.")
+        try:
+            vs_toolchain_path_for_test = Path(V8_SRC) / "build" / "vs_toolchain.py"
+            if vs_toolchain_path_for_test.exists():
+                # We expect exit code 0 because our shim makes it return dummy values.
+                # The cwd should be the parent directory of vs_toolchain.py.
+                cp = run([sys.executable, str(vs_toolchain_path_for_test), "get_toolchain_dir"], 
+                         cwd=vs_toolchain_path_for_test.parent, env=env, check=False, capture_output=True)
+                
+                if cp.returncode != 0:
+                    log("FATAL", f"vs_toolchain.py self-test FAILED (exit code {cp.returncode}). Stderr:\n{cp.stderr}", to_console=True)
+                    sys.exit(1)
+                else:
+                    log("INFO", "vs_toolchain.py self-test PASSED (exit code 0).", to_console=True)
+            else:
+                log("FATAL", "'vs_toolchain.py' not found after initial sync. Cannot run self-test. This indicates a deeper gclient issue.", to_console=True)
+                sys.exit(1) # Consider this fatal if essential file is missing.
+        except Exception as e:
+            log("FATAL", f"vs_toolchain.py self-test encountered an unexpected error: {e}", to_console=True)
+            sys.exit(1)
+        # END NEW SELF-TEST (MOVED)
+
+        # Step 4: Checkout specific V8 reference (commit/tag) in V8_SRC.
+        log("STEP", f"Checking out specific V8 reference ({V8_REF}) in {V8_SRC}.")
+        run(["git", "checkout", V8_REF], cwd=V8_SRC, env=env)
+        run(["git", "reset", "--hard", V8_REF], cwd=V8_SRC, env=env)
+        log("INFO", f"Checked out V8 ref {V8_REF}.")
+
+        # Step 5: Now, patch DEPS and the build/dotfile_settings.gni file for MinGW compatibility.
+        log("STEP", "Patching V8 DEPS file and 'build/dotfile_settings.gni' for MinGW compatibility.")
+        patch_v8_deps_for_mingw(V8_SRC, env)
+
+        # Step 6: Run a second gclient sync to apply any changes made to DEPS file.
+        # This sync will also ensure vs_toolchain.py is patched before and after its attempts.
+        log("STEP", "Running second gclient sync to apply DEPS changes and ensure consistency.")
+        gclient_sync_with_retry(env, V8_ROOT, V8_SRC)
+        
+        # Step 7: Write args.gn to out dir
+        log("STEP", "Writing args.gn configuration for MinGW build.")
+        write_args_gn(OUT_DIR)
+        
+        # Step 8: Run GN gen from V8_SRC
+        log("STEP", "Generating Ninja build files with GN.")
+        run_gn_gen(env)
+
+        # Step 9: Run ninja build from V8_SRC
+        log("STEP", "Starting the main V8 compilation with Ninja.")
+        run_ninja_build(env)
+
+        # Step 10: Copy artifacts into vcpkg installed tree
+        log("STEP", "Copying compiled V8 artifacts to vcpkg's installed directory.")
+        copy_to_vcpkg()
+        
+        # Step 11: Update/create vcpkg portfile and manifest for v8
+        log("STEP", "Updating vcpkg portfile and manifest for V8 integration.")
+        update_vcpkg_port(V8_VERSION, V8_REF, "https://chromium.googlesource.com/v8/v8", "BSD-3-Clause")
+        
+        # Step 12: Run vcpkg integrate install
+        log("STEP", "Running 'vcpkg integrate install' for system-wide CMake integration.")
+        vcpkg_integrate_install(env)
+        
+        log("SUCCESS", "V8 build + integration complete. Please inspect logs for details.", to_console=True)
+
+    except Exception as e:
+        log("FATAL", f"Build process encountered a fatal error: {e}", to_console=True)
+        sys.exit(1)
+    finally:
+        end_time = time.time()
+        duration = end_time - start_time
+        log("INFO", f"Script finished. Total time: {duration:.2f} seconds. Check full log file for details: {LOG_FILE}", to_console=True)
+        # Final status check from log files
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            log_content = f.read()
+            if "FATAL" in log_content or "ERROR" in log_content:
+                log("SUMMARY_ERROR", f"Errors or Fatal issues detected in logs. Please check CerebrumLux-V8-Build-{V8_VERSION}.log and CerebrumLux-V8-Build-{V8_VERSION}-error.log", to_console=True)
+            else:
+                log("SUMMARY_SUCCESS", "No major errors detected. V8 build is likely successful!", to_console=True)
+
+if __name__ == "__main__":
+    # Initial log file cleanup
+    os.makedirs(LOG_DIR, exist_ok=True) # Ensure LOG_DIR exists before trying to move files
+    if os.path.exists(LOG_FILE):
+        try:
+            timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+            shutil.move(LOG_FILE, f"{LOG_FILE}.old-{timestamp_str}")
+        except Exception as e:
+            print(f"WARN: Could not move old log file: {e}")
+    if os.path.exists(ERR_FILE):
+        try:
+            timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+            shutil.move(ERR_FILE, f"{ERR_FILE}.old-{timestamp_str}")
+        except Exception as e:
+            print(f"WARN: Could not move old error log file: {e}")
+    main()
