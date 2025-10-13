@@ -42,10 +42,10 @@ Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik, M
 ### 🧩 Kullanım
 1. Tüm gereksinimlerin sistem PATH’inde olduğundan emin olun.  
 2. Bu depoyu klonlayın:
-   ```bash
-   git clone https://github.com/algoritma/CerebrumLux_V8_Build.git
-   cd CerebrumLux_V8_Build
-````
+    ```bash
+    git clone https://github.com/algoritma/CerebrumLux_V8_Build.git
+    cd CerebrumLux_V8_Build
+    ````
 
 3. Betiği çalıştırın:
 
@@ -57,8 +57,8 @@ Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik, M
    ```
    C:\vcpkg\installed\x64-mingw-static\
    ```
-
    altına yerleştirilir.
+
 5. Artık `vcpkg integrate install` ile sistem genelinde kullanılabilir.
 
 ---
@@ -79,6 +79,24 @@ Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik, M
 * Betik başarısız olursa, en son log dosyasına (`logs/`) bakmanız yeterlidir.
 * Tüm işlem genellikle 30–60 dakika sürer (bağlantı hızına bağlı olarak).
 
+---
+
+### ⚠️ CMakeList.txt İçeriği
+
+    ```bash
+    target_include_directories(CerebrumLuxGUI PRIVATE
+        "${PROJECT_SRC_DIR}"
+        ...
+        "C:/vcpkg/installed/x64-mingw-static/include" # gumbo ve v8 başlık dizinlerini manuel ekle (vcpkg'ye kopyalandı)
+    )
+
+    target_link_libraries(CerebrumLuxCore PUBLIC
+        Qt6::Core
+        ...
+        # Google V8
+        v8_monolith
+    )
+    ```
 ---
 
 ## 🇬🇧 English Description
@@ -158,6 +176,24 @@ Normally V8 requires Visual Studio and Clang; this script **eliminates that depe
 * Check the `logs/` directory for detailed error traces if something fails.
 * The whole process may take 30–60 minutes depending on network speed.
 
+---
+
+### ⚠️ CMakeList.txt İçeriği
+
+    ```bash
+    target_include_directories(CerebrumLuxGUI PRIVATE
+        "${PROJECT_SRC_DIR}"
+        ...
+        "C:/vcpkg/installed/x64-mingw-static/include" # gumbo ve v8 başlık dizinlerini manuel ekle (vcpkg'ye kopyalandı)
+    )
+
+    target_link_libraries(CerebrumLuxCore PUBLIC
+        Qt6::Core
+        ...
+        # Google V8
+        v8_monolith
+    )
+    ```
 ---
 
 ## 📜 License
