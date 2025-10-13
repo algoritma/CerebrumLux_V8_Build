@@ -1,7 +1,9 @@
 
 # 🧠 CerebrumLux V8 Build Automation (MinGW Compatible)
 **Version:** 6.0    
-**License:** BSD-3-Clause  
+**License:**  
+- **CerebrumLux Build Script:** MIT License © 2025 algoritma  
+- **Google V8 Engine:** BSD-3-Clause License © The Chromium Authors
 **Repository:** [github.com/algoritma/CerebrumLux_V8_Build](https://github.com/algoritma/CerebrumLux_V8_Build)
 
 ---
@@ -27,13 +29,13 @@ Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik, M
 ---
 
 ### ⚙️ Gereksinimler
-| Bileşen           | Yol Örneği                                                            | Açıklama              |
-|-------------------|-----------------------------------------------------------------------|-----------------------|
-| **Python 3.10+**  | `C:\Users\<kullanıcı>\AppData\Local\Microsoft\WindowsApps\python.exe` | Ana çalıştırma ortamı |
-| **Git**           | `C:\Program Files\Git\bin`                                            | Kaynak yönetimi       |
-| **MinGW (x86_64)**| `C:\Qt\Tools\mingw1310_64\bin`                                        | Derleyici             |
-| **depot_tools**   | `C:\depot_tools`                                                      | V8 kaynak yöneticisi  |
-| **vcpkg**         | `C:\vcpkg`                                                            | C++ paket yöneticisi  |
+| Bileşen            | Yol Örneği                                                      | Açıklama              |
+| ------------------ | ----------------------------------------------------------------| --------------------- |
+| **Python 3.10+**   | `C:\Users\<user>\AppData\Local\Microsoft\WindowsApps\python.exe`| Ana çalıştırma ortamı |
+| **Git**            | `C:\Program Files\Git\bin`                                      | Kaynak yönetimi       |
+| **MinGW (x86_64)** | `C:\Qt\Tools\mingw1310_64\bin`                                  | Derleyici             |
+| **depot_tools**    | `C:\depot_tools`                                                | V8 kaynak yöneticisi  |
+| **vcpkg**          | `C:\vcpkg`                                                      | C++ paket yöneticisi  |
 
 ---
 
@@ -159,8 +161,8 @@ Normally V8 requires Visual Studio and Clang; this script **eliminates that depe
 ---
 
 ## 📜 License
-
-This project follows the **BSD-3-Clause License**, the same as the original V8 project.
+- **CerebrumLux Build Script:** MIT License © 2025 algoritma  
+- **Google V8 Engine:** BSD-3-Clause License © The Chromium Authors
 
 ---
 
