@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v6.2 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v6.3 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 - MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -24,6 +24,7 @@ CerebrumLux V8 Build Automation v6.2 (Final Robust MinGW Build - Incorporating a
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
 - FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
+- NEW: Disabled aggressive removal of V8_ROOT at start of script to allow incremental updates and prevent repeated full downloads.
 """
 import os
 import sys
@@ -140,7 +141,7 @@ def run(cmd_list, cwd=None, env=None, check=True, capture_output=True):
     Run a shell command. Returns subprocess.CompletedProcess or raises.
     `cmd_list` should be a list of arguments for shell=False.
     """
-    cmd_str = ' '.join(cmd_list) if isinstance(cmd_list, list) else cmd_str
+    cmd_str = ' '.join(cmd_list) if isinstance(cmd_list, list) else cmd_list
     log("INFO", f"RUN: {cmd_str} (CWD: {cwd or os.getcwd()})", to_console=False)
     try:
         cp = subprocess.run(cmd_list, cwd=cwd, env=env, shell=False, # shell=False for list of commands
@@ -285,7 +286,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v6.2) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v6.3) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -309,7 +310,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # If shim already present (idempotence), skip prepending again.
         # Check for the updated shim marker.
-        if "# --- CerebrumLux injected shim START (v6.2) ---" not in text:
+        if "# --- CerebrumLux injected shim START (v6.3) ---" not in text:
             # Prepend shim at the very top of file so it's available immediately on module execution.
             text = shim_block + text
             modified = True
@@ -359,17 +360,17 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         else:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             # Final check to ensure the shim is actually present and critical issues are gone.
-            if "# --- CerebrumLux injected shim START (v6.2) ---" not in text: # Check for the updated shim marker
+            if "# --- CerebrumLux injected shim START (v6.3) ---" not in text: # Check for the updated shim marker
                 log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             # Ensure original definitions are actually removed or commented out.
             if re.search(func_body_pattern, text):
                 log("ERROR", f"'{vs_toolchain_path.name}' still contains original function definitions despite patching. Patching is NOT sticking.", to_console=False)
                 return False
-            if "import pipes" in text and "import pipes (replaced by CerebrumLux shim)" not in text:
+            if "import pipes" in text and not ("# import pipes (replaced by CerebrumLux shim)" in text):
                 log("ERROR", f"'{vs_toolchain_path.name}' still contains 'import pipes' but was not replaced. Patching is NOT sticking.", to_console=False)
                 return False
-            if "No supported Visual Studio can be found" in text and "# CerebrumLux neutralized original exception" not in text:
+            if "No supported Visual Studio can be found" in text and not ("# CerebrumLux neutralized original exception" in text):
                 log("ERROR", f"'{vs_toolchain_path.name}' contains VS detection exception but was not neutralized. Patching is NOT sticking.", to_console=False)
                 return False
             
@@ -554,7 +555,7 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 # Check for "import pipes" or the original problematic exception string, AND for our shim
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               "# --- CerebrumLux injected shim START (v6.2) ---" not in content_before_patch) # If our shim isn't there, it needs patching
+                               "# --- CerebrumLux injected shim START (v6.3) ---" not in content_before_patch) # If our shim isn't there, it needs patching
 
                 if not needs_patch:
                     log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim is present. Pre-sync patch skipped (already fine).", to_console=False)
@@ -697,7 +698,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v6.2
+# Auto-generated by CerebrumLux V8 Builder v6.3
 # This portfile directly uses the pre-built V8 library and headers
 # generated by CerebrumLux's custom build script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -767,18 +768,17 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v6.2 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v6.3 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
     try:
-        # Step 0: Initial full cleanup (more aggressive now)
+        # Step 0: Initial full cleanup (REMOVED for incremental updates, only create V8_ROOT if it doesn't exist)
+        # If user wants a fresh start, they must manually delete C:\v8-mingw
         if os.path.isdir(V8_ROOT):
-            log("INFO", f"Removing existing V8_ROOT for fresh start: {V8_ROOT}")
-            aggressive_rmtree(V8_ROOT)
-            if os.path.isdir(V8_ROOT):
-                log("FATAL", f"Failed to remove V8_ROOT '{V8_ROOT}' after aggressive attempts. Please delete manually and retry.", to_console=True)
-                sys.exit(1)
+            log("INFO", f"V8_ROOT '{V8_ROOT}' exists. Attempting incremental update. Manual deletion required for full fresh start.", to_console=True)
+        else:
+            log("INFO", f"Creating V8_ROOT for fresh start: {V8_ROOT}", to_console=True)
         os.makedirs(V8_ROOT, exist_ok=True) # Ensure V8_ROOT exists for .gclient
 
         # Step 1: Ensure depot_tools is cloned and ready
@@ -790,7 +790,6 @@ def main():
         write_gclient_file(V8_ROOT, V8_GIT_URL)
 
         # Step 3: Run the initial gclient sync to clone V8 and fetch core dependencies.
-        # This sync will now ensure vs_toolchain.py is patched before and after each retry internally.
         log("STEP", "Running initial gclient sync to clone V8 and fetch core dependencies.")
         gclient_sync_with_retry(env, V8_ROOT, V8_SRC)
         
