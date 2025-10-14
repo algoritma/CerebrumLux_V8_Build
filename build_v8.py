@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.12 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.13 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -40,7 +40,8 @@ CerebrumLux V8 Build Automation v7.12 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.9): Implemented automatic injection of 'vcvars_toolchain_data' object with all required dummy paths directly into args.gn within run_gn_gen() to resolve "No value named 'vc_lib_path' in scope 'vcvars_toolchain_data'" error and ensured corresponding dummy directories are created on disk.
 - FIX (v7.10): Corrected "May only use "." for identifiers" error in args.gn patching by pre-formatting paths with .as_posix() in Python, removing .replace() calls from GN strings.
 - FIX (v7.11): Further refined args.gn injection logic in run_gn_gen() for vcvars_toolchain_data to ensure paths are direct string literals using .as_posix() without any GN-side processing methods, addressing "May only use "." for identifiers" error. Updated shim version.
-- FIX (v7.12): Added a new patch function to neutralize the 'exec_script' call for 'setup_toolchain.py' within 'build/config/win/BUILD.gn', thereby relying purely on args.gn injection for 'vcvars_toolchain_data'. Updated shim version.
+- FIX (v7.12): Added a new patch function (_patch_build_gn) to neutralize the 'exec_script' call for 'setup_toolchain.py' within 'build/config/win/BUILD.gn', thereby relying purely on args.gn injection for 'vcvars_toolchain_data'. Updated shim version.
+- FIX (v7.13): Aggressively patched 'build/config/win/BUILD.gn' to replace direct accesses to 'vcvars_toolchain_data.<field>' with hardcoded dummy paths (using .as_posix()) after neutralizing the exec_script call, resolving "No value named 'vc_lib_path' in scope 'vcvars_toolchain_data'" error. All dummy path injections now consistently use .as_posix(). Updated shim version.
 """
 import os
 import sys
@@ -322,7 +323,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         # FIX (v7.1): Changed wdk_path, sdk_path, and DetectVisualStudioPath to non-empty dummy paths.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.11) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.12) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -357,7 +358,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         )
 
         # Check for the *current* shim version. If it's not present, or if an older version is, apply.
-        if f"# --- CerebrumLux injected shim START (v7.11) ---" not in text: 
+        if f"# --- CerebrumLux injected shim START (v7.12) ---" not in text: 
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -423,8 +424,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             # Re-verify if the shim is still correct in case no 'modified' flag was set (e.g., if re-running)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.11) ---" not in current_content:
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.11) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.12) ---" not in current_content:
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.12) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -438,7 +439,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 return False
             # Also explicitly check the dummy paths within the shim for consistency (v7.1 check)
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.11 content missing).", to_console=False)
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.12 content missing).", to_console=False)
                  return False
             
             return True
@@ -746,35 +747,85 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
 def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
     """
     Patches V8_SRC/build/config/win/BUILD.gn to neutralize the 'exec_script' call
-    that populates vcvars_toolchain_data, relying instead on args.gn for this.
+    that populates vcvars_toolchain_data, and replaces direct accesses to
+    vcvars_toolchain_data members with hardcoded dummy paths, relying instead on args.gn for this.
     """
     build_gn_path = Path(v8_source_dir) / "build" / "config" / "win" / "BUILD.gn"
     if not build_gn_path.exists():
         log("WARN", f"'{build_gn_path.name}' not found at {build_gn_path}. Skipping patch.", to_console=True)
         return False
 
-    log("INFO", f"Patching '{build_gn_path.name}' to neutralize 'exec_script' for vcvars_toolchain_data.", to_console=True)
+    log("INFO", f"Patching '{build_gn_path.name}' to neutralize 'exec_script' and replace vcvars_toolchain_data accesses with dummy paths.", to_console=True)
     try:
         content = build_gn_path.read_text(encoding="utf-8")
         patched_content = content
         modified = False
 
-        # Regex to find the exec_script call that assigns to vcvars_toolchain_data
-        # It's important to be specific enough to avoid unintended changes.
-        # The error log often shows the exact line, e.g., line 297:
-        # vcvars_toolchain_data = exec_script("../../toolchain/win/setup_toolchain.py",
+        # --- 1. Neutralize the exec_script call for vcvars_toolchain_data ---
         exec_script_vcvars_pattern = re.compile(
             r"^(?P<indent>\s*)vcvars_toolchain_data\s*=\s*exec_script\(\"..\s*/..\s*/toolchain/win/setup_toolchain\.py\"[\s\S]*?\)\s*\n",
             re.MULTILINE | re.DOTALL
         )
 
         if exec_script_vcvars_pattern.search(patched_content):
-            # Comment out the line to neutralize it
             patched_content = exec_script_vcvars_pattern.sub(r"\g<indent># CerebrumLux neutralized: \g<0>", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'vcvars_toolchain_data' in '{build_gn_path.name}'.", to_console=False)
         else:
             log("INFO", f"No 'exec_script' call for 'vcvars_toolchain_data' found in '{build_gn_path.name}' or already neutralized. Skipping.", to_console=False)
+
+        # --- 2. Replace direct accesses to vcvars_toolchain_data.<field> with hardcoded dummy paths ---
+        # Define dummy paths using the same base as in _patch_setup_toolchain_py for consistency
+        fake_vs_base_path_for_gn_obj = Path(V8_ROOT) / "FakeVS_Toolchain"
+        
+        # Create dummy directories if they don't exist
+        # These are created directly here to ensure they exist for GN to read, even if setup_toolchain.py didn't create all.
+        os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "lib", exist_ok=True)
+        os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "atlmfc" / "lib", exist_ok=True)
+        os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib", exist_ok=True)
+        os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "ucrt" / "lib", exist_ok=True)
+        log("DEBUG", f"Ensured specific dummy directories for BUILD.gn patch exist under {fake_vs_base_path_for_gn_obj.as_posix()}.", to_console=False)
+
+
+        # Map of vcvars_toolchain_data fields to their hardcoded dummy paths (as_posix() ensures forward slashes)
+        dummy_vcvars_paths = {
+            "vc_lib_path": (fake_vs_base_path_for_gn_obj / "VC" / "lib").as_posix(),
+            "vc_lib_atlmfc_path": (fake_vs_base_path_for_gn_obj / "VC" / "atlmfc" / "lib").as_posix(),
+            "vc_lib_um_path": (fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib").as_posix(),
+            "vc_lib_ucrt_path": (fake_vs_base_path_for_gn_obj / "VC" / "ucrt" / "lib").as_posix(),
+            # Add other fields if BUILD.gn accesses them directly later
+            # For now, focusing on the ones that caused errors
+        }
+
+        for field, dummy_path in dummy_vcvars_paths.items():
+            # Regex to find direct access like `some_variable = vcvars_toolchain_data.<field>`
+            # and replace it with `some_variable = "<dummy_path>"`
+            # We also consider cases where it's part of a list or concatenation.
+            # This regex aims to be robust by capturing the part before and after.
+            
+            # Pattern for assignment (e.g., `foo = vcvars_toolchain_data.vc_lib_path`)
+            assignment_pattern = re.compile(
+                r"^(?P<indent>\s*)(?P<lhs>[a-zA-Z0-9_]+\s*=\s*)vcvars_toolchain_data\." + re.escape(field) + r"(?P<rest>.*)$",
+                re.MULTILINE
+            )
+            initial_field_replace_text = patched_content
+            patched_content = assignment_pattern.sub(r"\g<indent>\g<lhs>\"" + dummy_path + r"\"\g<rest> # CerebrumLux MinGW patch", patched_content)
+            if initial_field_replace_text != patched_content:
+                modified = True
+                log("INFO", f"Replaced assignment for 'vcvars_toolchain_data.{field}' with hardcoded dummy path in '{build_gn_path.name}'.", to_console=False)
+
+            # Pattern for usage within lists/strings (e.g. `cflags += [ vcvars_toolchain_data.vc_lib_path ]` or `"/I" + vcvars_toolchain_data.vc_include_path`)
+            # This is more complex. For now, assuming direct assignment is the primary issue.
+            # If errors persist, a more general pattern might be needed for `vcvars_toolchain_data.<field>` anywhere it appears.
+            
+            # A more generic replacement for any occurrence of the field access:
+            generic_access_pattern = re.compile(r"vcvars_toolchain_data\." + re.escape(field), re.MULTILINE)
+            initial_generic_replace_text = patched_content
+            patched_content = generic_access_pattern.sub(f'"{dummy_path}"', patched_content)
+            if initial_generic_replace_text != patched_content:
+                modified = True
+                log("INFO", f"Replaced generic access to 'vcvars_toolchain_data.{field}' with hardcoded dummy path in '{build_gn_path.name}'.", to_console=False)
+
 
         if modified:
             try:
@@ -937,17 +988,17 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Combined check for critical strings (pipes, VS exception) and v7.11 shim content
+                # Combined check for critical strings (pipes, VS exception) and v7.12 shim content
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               f"# --- CerebrumLux injected shim START (v7.11) ---" not in content_before_patch or
+                               f"# --- CerebrumLux injected shim START (v7.12) ---" not in content_before_patch or
                                any(s in content_before_patch for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]))
 
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.11) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.12) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.11 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.12 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -1089,7 +1140,7 @@ def run_gn_gen(env):
                 fake_vs_base_path_for_gn_obj = Path(V8_ROOT) / "FakeVS_Toolchain"
                 fake_vs_base_path_for_gn_posix = fake_vs_base_path_for_gn_obj.as_posix()
                 
-                # Ensure the dummy directories exist on disk for GN to reference (redundant but safe)
+                # Ensure the dummy directories exist on disk for GN to reference
                 os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "bin", exist_ok=True)
                 os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "lib", exist_ok=True)
                 os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "include", exist_ok=True)
@@ -1097,6 +1148,7 @@ def run_gn_gen(env):
                 os.makedirs(fake_vs_base_path_for_gn_obj / "SDK" / "lib", exist_ok=True)
                 os.makedirs(fake_vs_base_path_for_gn_obj / "SDK" / "include", exist_ok=True)
                 os.makedirs(fake_vs_base_path_for_gn_obj / "redist", exist_ok=True)
+                # Specific sub-directories for vcvars_toolchain_data paths
                 os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "atlmfc" / "lib", exist_ok=True)
                 os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib", exist_ok=True)
                 os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "ucrt" / "lib", exist_ok=True)
@@ -1219,7 +1271,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.12
+# Auto-generated by CerebrumLux V8 Builder v7.13
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1283,7 +1335,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v7.12 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.13 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
@@ -1337,7 +1389,7 @@ def main():
         # The patching functions contain logic to check if patches are already applied
         # and re-apply if needed, so calling them here is safe and ensures persistence.
         if not _patch_dotfile_settings_gni(V8_SRC, env):
-            log("FATAL", "Failed to re-patch 'build/dotfile_settings.gni' after sync. Aborting.", to_console=True)
+            log("FATAL", "Failed to re-patch 'build/dotfile_settings.gni'. Aborting.", to_console=True)
             sys.exit(1)
         if not _patch_visual_studio_version_gni(V8_SRC, env):
             log("FATAL", "Failed to re-patch 'build/config/win/visual_studio_version.gni'. Aborting.", to_console=True)
