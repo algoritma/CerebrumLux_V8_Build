@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v6.8 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v6.9 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 - MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -21,7 +21,7 @@ CerebrumLux V8 Build Automation v6.8 (Final Robust MinGW Build - Incorporating a
 - FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
 - FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
 - FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN DELETING original GetVisualStudioVersion(), DetectVisualStudioPath(), AND SetEnvironmentAndGetRuntimeDllDirs() bodies, resolving IndentationError and NameError.
-- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, AND COMMENTING OUT the exec_script call that fetches toolchain_data. Also fixed re.sub flags issue and regex character set issue.
+- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, AND COMMENTING OUT the exec_script call that fetches toolchain_data. Also fixed re.sub flags issue in assignment_pattern loop.
 - FIX: Corrected cmd_str initialization in run() helper and os.os.path in run_ninja_build().
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
