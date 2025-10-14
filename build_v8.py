@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.7 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.8 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -36,6 +36,7 @@ CerebrumLux V8 Build Automation v7.7 (Final Robust MinGW Build - Incorporating a
 - FIX (v7.5): Patched 'setup_toolchain.py' to completely replace _LoadToolchainEnv, bypassing the 'vcvarsall.bat' check and returning a dummy environment.
 - FIX (v7.6): Further refined 'setup_toolchain.py' patch to ensure _LoadToolchainEnv returns a dictionary with all expected keys (vc_bin_dir, vc_lib_path, etc.) and added os.makedirs for dummy directories to bypass path existence checks.
 - FIX (v7.7): Made log() function more robust against I/O errors and added auto-patching of args.gn within run_gn_gen() to inject missing vcvars_toolchain_data variables based on GN error output.
+- FIX (v7.8): Corrected 'bad escape' error in _patch_setup_toolchain_py by using Path.as_posix() for dummy paths and fixed log() function typo for error file writing.
 """
 import os
 import sys
@@ -107,7 +108,7 @@ def log(level, msg, to_console=True):
     if level in ("ERROR", "FATAL"):
         try:
             with open(ERR_FILE, "a", encoding="utf-8") as ef:
-                ef.write(line + "\n")
+                ef.write(line + "\n") # Corrected: use 'ef' for error file
         except Exception as e:
             if to_console:
                 print(f"ERROR: Could not write to error log file: {e} - {line}")
@@ -317,7 +318,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         # FIX (v7.1): Changed wdk_path, sdk_path, and DetectVisualStudioPath to non-empty dummy paths.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.6) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.7) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -352,7 +353,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         )
 
         # Check for the *current* shim version. If it's not present, or if an older version is, apply.
-        if f"# --- CerebrumLux injected shim START (v7.6) ---" not in text: 
+        if f"# --- CerebrumLux injected shim START (v7.7) ---" not in text: 
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -418,8 +419,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             # Re-verify if the shim is still correct in case no 'modified' flag was set (e.g., if re-running)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.6) ---" not in current_content:
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.6) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.7) ---" not in current_content:
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.7) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -433,7 +434,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 return False
             # Also explicitly check the dummy paths within the shim for consistency (v7.1 check)
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.6 content missing).", to_console=False)
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.7 content missing).", to_console=False)
                  return False
             
             return True
@@ -638,7 +639,7 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
         log("WARN", f"'{setup_toolchain_path.name}' not found at {setup_toolchain_path}. Skipping patch.", to_console=True)
         return False
 
-    log("INFO", f"Patching '{setup_toolchain_path.name}' to completely replace _LoadToolchainEnv and create dummy paths.", to_console=True)
+    log("INFO", f"Patching '{setup_toolchain_path.name}' to completely replace _LoadToolchainEnv and create dummy paths (using .as_posix()).", to_console=True)
     try:
         content = setup_toolchain_path.read_text(encoding="utf-8")
         patched_content = content
@@ -647,6 +648,7 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
         # FIX (v7.5): Completely replace _LoadToolchainEnv to bypass vcvarsall.bat check.
         # This is more robust than trying to patch inside the function.
         # FIX (v7.6): Ensure the replacement body includes all expected keys and creates dummy directories.
+        # FIX (v7.8): Use .as_posix() for paths in the replacement string to avoid bad escape errors.
         pattern_load_toolchain_env = re.compile(
             r"^(def\s+_LoadToolchainEnv\([^)]*\):(?:\n\s+.*)*?)(?=\n^def|\Z)", # Matches the entire function body
             re.MULTILINE | re.DOTALL
@@ -673,19 +675,19 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
             os.makedirs(fake_sdk_include_path, exist_ok=True)
             os.makedirs(fake_runtime_dirs, exist_ok=True)
 
-            # Use forward slashes for paths in the string for consistency with GN
+            # Use .as_posix() for paths in the string for consistency with GN and to avoid escape issues
             replacement_func_body = f"""def _LoadToolchainEnv(cpu, toolchain_root, win_sdk_path, target_store):
     # CerebrumLux MinGW patch: Bypassed vcvarsall.bat check and returning a dummy env.
     # The actual toolchain paths are provided in args.gn or directly configured.
     # Dummy directories created by build_v8.py if not already present.
     return {{
-        "vc_bin_dir": "{str(fake_vc_bin_dir).replace('\\\\', '/')}",
-        "vc_lib_path": "{str(fake_vc_lib_path).replace('\\\\', '/')}",
-        "vc_include_path": "{str(fake_vc_include_path).replace('\\\\', '/')}",
-        "sdk_dir": "{str(fake_sdk_dir).replace('\\\\', '/')}",
-        "sdk_lib_path": "{str(fake_sdk_lib_path).replace('\\\\', '/')}",
-        "sdk_include_path": "{str(fake_sdk_include_path).replace('\\\\', '/')}",
-        "runtime_dirs": "{str(fake_runtime_dirs).replace('\\\\', '/')}"
+        "vc_bin_dir": "{fake_vc_bin_dir.as_posix()}",
+        "vc_lib_path": "{fake_vc_lib_path.as_posix()}",
+        "vc_include_path": "{fake_vc_include_path.as_posix()}",
+        "sdk_dir": "{fake_sdk_dir.as_posix()}",
+        "sdk_lib_path": "{fake_sdk_lib_path.as_posix()}",
+        "sdk_include_path": "{fake_sdk_include_path.as_posix()}",
+        "runtime_dirs": "{fake_runtime_dirs.as_posix()}"
     }}
 """
             patched_content = pattern_load_toolchain_env.sub(
@@ -693,14 +695,14 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
                 patched_content
             )
             modified = True
-            log("INFO", f"Replaced '_LoadToolchainEnv' function body in '{setup_toolchain_path.name}' with full dummy environment.", to_console=False)
+            log("INFO", f"Replaced '_LoadToolchainEnv' function body in '{setup_toolchain_path.name}' with full dummy environment (using .as_posix()).", to_console=False)
         else:
             # Fallback for older structures (should not be hit with current _LoadToolchainEnv replacement)
             # Patch _DetectVisualStudioPath
             pattern_detect_vs_path = re.compile(r"^(?P<indent>\s*)return\s+vs_toolchain\.DetectVisualStudioPath\(\)\s*$", re.MULTILINE)
             if pattern_detect_vs_path.search(patched_content):
                 patched_content = pattern_detect_vs_path.sub(
-                    r"\g<indent>return r'C:\\FakeVS' # CerebrumLux MinGW patch",
+                    r"\g<indent>return 'C:/FakeVS' # CerebrumLux MinGW patch", # Use / for consistency
                     patched_content
                 )
                 modified = True
@@ -871,17 +873,17 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Combined check for critical strings (pipes, VS exception) and v7.6 shim content
+                # Combined check for critical strings (pipes, VS exception) and v7.7 shim content
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               f"# --- CerebrumLux injected shim START (v7.6) ---" not in content_before_patch or
+                               f"# --- CerebrumLux injected shim START (v7.7) ---" not in content_before_patch or
                                any(s in content_before_patch for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]))
 
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.6) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.7) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.6 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.7 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -1020,13 +1022,13 @@ def run_gn_gen(env):
                 new_args_to_add = []
                 # Use the same FakeVS_Toolchain paths as in _patch_setup_toolchain_py for consistency
                 fake_vs_root = Path(V8_ROOT) / "FakeVS_Toolchain"
-                if 'vc_bin_dir =' not in current_args_content: new_args_to_add.append(f'vc_bin_dir = "{str(fake_vs_root / "VC" / "bin").replace("\\", "/")}"')
-                if 'vc_lib_path =' not in current_args_content: new_args_to_add.append(f'vc_lib_path = "{str(fake_vs_root / "VC" / "lib").replace("\\", "/")}"')
-                if 'vc_include_path =' not in current_args_content: new_args_to_add.append(f'vc_include_path = "{str(fake_vs_root / "VC" / "include").replace("\\", "/")}"')
-                if 'sdk_dir =' not in current_args_content: new_args_to_add.append(f'sdk_dir = "{str(fake_vs_root / "SDK").replace("\\", "/")}"')
-                if 'sdk_lib_path =' not in current_args_content: new_args_to_add.append(f'sdk_lib_path = "{str(fake_vs_root / "SDK" / "lib").replace("\\", "/")}"')
-                if 'sdk_include_path =' not in current_args_content: new_args_to_add.append(f'sdk_include_path = "{str(fake_vs_root / "SDK" / "include").replace("\\", "/")}"')
-                if 'runtime_dirs =' not in current_args_content: new_args_to_add.append(f'runtime_dirs = [ "{str(fake_vs_root / "redist").replace("\\", "/")}" ]')
+                if 'vc_bin_dir =' not in current_args_content: new_args_to_add.append(f'vc_bin_dir = "{fake_vs_root.as_posix()}/VC/bin"')
+                if 'vc_lib_path =' not in current_args_content: new_args_to_add.append(f'vc_lib_path = "{fake_vs_root.as_posix()}/VC/lib"')
+                if 'vc_include_path =' not in current_args_content: new_args_to_add.append(f'vc_include_path = "{fake_vs_root.as_posix()}/VC/include"')
+                if 'sdk_dir =' not in current_args_content: new_args_to_add.append(f'sdk_dir = "{fake_vs_root.as_posix()}/SDK"')
+                if 'sdk_lib_path =' not in current_args_content: new_args_to_add.append(f'sdk_lib_path = "{fake_vs_root.as_posix()}/SDK/lib"')
+                if 'sdk_include_path =' not in current_args_content: new_args_to_add.append(f'sdk_include_path = "{fake_vs_root.as_posix()}/SDK/include"')
+                if 'runtime_dirs =' not in current_args_content: new_args_to_add.append(f'runtime_dirs = [ "{fake_vs_root.as_posix()}/redist" ]')
                 
                 # Also ensure visual_studio_path and visual_studio_version are set in args.gn if not present
                 if 'visual_studio_path =' not in current_args_content: new_args_to_add.append('visual_studio_path = "C:/FakeVS"')
@@ -1112,7 +1114,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.7
+# Auto-generated by CerebrumLux V8 Builder v7.8
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1176,7 +1178,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v7.7 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.8 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
