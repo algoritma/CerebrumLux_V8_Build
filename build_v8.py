@@ -21,7 +21,7 @@ CerebrumLux V8 Build Automation v6.6 (Final Robust MinGW Build - Incorporating a
 - FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
 - FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
 - FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN DELETING original GetVisualStudioVersion(), DetectVisualStudioPath(), AND SetEnvironmentAndGetRuntimeDllDirs() bodies, resolving IndentationError and NameError.
-- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to provide dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, bypassing 'No value named "vs_path" in scope "toolchain_data"' error during 'gn gen'.
+- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, bypassing 'No value named "vs_path" in scope "toolchain_data"' error during 'gn gen'.
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
 - FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
@@ -435,7 +435,8 @@ def _patch_dotfile_settings_gni(v8_source_dir: str, env: dict) -> bool:
 def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
     """
     Patches V8_SRC/build/config/win/visual_studio_version.gni to provide dummy values
-    for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs.
+    for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs,
+    bypassing dynamic toolchain data fetching and associated errors.
     """
     vs_version_gni_path = Path(v8_source_dir) / "build" / "config" / "win" / "visual_studio_version.gni"
     if not vs_version_gni_path.exists():
@@ -448,33 +449,73 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
         patched_content = content
         modified = False
 
-        # Remove the import line for toolchain_data.gni as we are bypassing it.
+        # 1. Neutralize the import line for toolchain_data.gni
         import_toolchain_data_pattern = r"^\s*import\s*\(\"//build/toolchain/win/toolchain_data\.gni\"\)\s*\n"
         if re.search(import_toolchain_data_pattern, patched_content, re.MULTILINE):
             patched_content = re.sub(import_toolchain_data_pattern, r"# CerebrumLux neutralized: \g<0>", patched_content, flags=re.MULTILINE)
             modified = True
             log("INFO", f"Neutralized 'import(\"//build/toolchain/win/toolchain_data.gni\")' in '{vs_version_gni_path.name}'.", to_console=False)
 
-        # Find the declare_args() block and replace its contents with our dummy values.
-        # This regex needs to be careful not to match other declare_args blocks, though unlikely here.
-        # It looks for 'declare_args() {' and tries to find its matching '}' by indentation/structure.
-        declare_args_block_pattern = r"(?P<start>^\s*declare_args\s*\(\s*\)\s*\{\n)(?P<body_content>(?:^\s*(?!\s*\}\s*$|\s*declare_args).*?\n)*?)(?P<end>^\s*\}\s*$)"
-        match = re.search(declare_args_block_pattern, patched_content, re.MULTILINE | re.DOTALL)
+        # 2. Find and remove/replace the 'if (host_os == "win") { ... }' block
+        # that contains the exec_script call and assignments to VS variables.
+        # This regex needs to capture the whole block reliably.
+        if_host_os_win_block_pattern = re.compile(
+            r"(^\s*if\s+\(host_os\s*==\s*\"win\"\)\s*\{\n)" + # Start of the if block
+            r"(?P<block_content>(?:^\s*(?:#.*)?\n?)*?" + # Match lines within the block, including comments and empty lines
+            r"^\s*toolchain_data\s*=\s*exec_script\s*\(\"..\s*/../vs_toolchain\.py\"[\s\S]*?" + # The problematic exec_script call
+            r"^\s*visual_studio_path\s*=\s*toolchain_data\.vs_path[\s\S]*?" + # Assignment lines
+            r"^\s*visual_studio_version\s*=\s*toolchain_data\.version[\s\S]*?" +
+            r"^\s*visual_studio_runtime_dirs\s*=\s*toolchain_data\.runtime_dirs[\s\S]*?)" + # End of assignments
+            r"(^\s*\})" # Closing brace of the if block
+            , re.MULTILINE | re.DOTALL
+        )
+        match_if_block = re.search(if_host_os_win_block_pattern, patched_content)
 
-        if match:
-            indent_level = match.group('start').splitlines()[0].split('declare_args')[0] # Indentation before declare_args
+        if match_if_block:
+            log("INFO", "Found and neutralizing 'if (host_os == \"win\") {' block containing VS detection logic.", to_console=False)
             
-            new_declare_args_body = f"""{indent_level}  # CerebrumLux MinGW patch: Force dummy VS paths/versions to bypass detection errors.
+            indent_level = re.match(r"^\s*", match_if_block.group(1), re.MULTILINE).group(0) # Indent of the if statement
+            
+            # Create replacement block: set fixed values directly
+            replacement_block = f"""{indent_level}# CerebrumLux MinGW patch: Force dummy VS paths/versions to bypass detection errors.
+{indent_level}if (host_os == "win") {{
 {indent_level}  visual_studio_path = ""
-{indent_level}  visual_studio_version = "16.0" # A dummy but valid-looking version
+{indent_level}  visual_studio_version = "16.0"
 {indent_level}  visual_studio_runtime_dirs = []
+{indent_level}}}
 """
-            # Replace the original body within the declare_args block
-            patched_content = patched_content[:match.start('body_content')] + new_declare_args_body + patched_content[match.end('body_content'):]
+            # Replace the entire original if block with our simplified one.
+            patched_content = patched_content[:match_if_block.start()] + replacement_block + patched_content[match_if_block.end():]
             modified = True
-            log("INFO", f"Replaced 'declare_args()' content with dummy VS values in '{vs_version_gni_path.name}'.", to_console=True)
+            log("INFO", f"Successfully replaced 'if (host_os == \"win\") {{...}}' block with dummy VS values in '{vs_version_gni_path.name}'.", to_console=True)
         else:
-            log("WARN", f"Could not find 'declare_args()' block in '{vs_version_gni_path.name}'. Skipping replacement.", to_console=True)
+            log("WARN", f"Could not find specific 'if (host_os == \"win\") {{...}}' block to patch. Attempting to ensure declare_args has values.", to_console=True)
+            # Fallback: if the specific if block is not found, ensure declare_args has the values.
+            # This is less ideal but provides a fallback for unexpected file structures.
+            declare_args_block_pattern = re.compile(r"(^\s*declare_args\s*\(\s*\)\s*\{\n)(?P<body_content>[\s\S]*?)(^\s*\}\s*$)", re.MULTILINE | re.DOTALL)
+            match_declare_args = re.search(declare_args_block_pattern, patched_content)
+
+            if match_declare_args:
+                current_declare_args_body = match_declare_args.group('body_content')
+                indent_level_declare_args = re.match(r"^\s*", match_declare_args.group(1), re.MULTILINE).group(0)
+                
+                # Check and insert if not present
+                if 'visual_studio_path =' not in current_declare_args_body:
+                    patched_content = patched_content[:match_declare_args.end('body_content')] + f"{indent_level_declare_args}  visual_studio_path = \"\"\n" + patched_content[match_declare_args.end('body_content'):]
+                    modified = True
+                if 'visual_studio_version =' not in current_declare_args_body:
+                    patched_content = patched_content[:match_declare_args.end('body_content')] + f"{indent_level_declare_args}  visual_studio_version = \"16.0\"\n" + patched_content[match_declare_args.end('body_content'):]
+                    modified = True
+                if 'visual_studio_runtime_dirs =' not in current_declare_args_body:
+                    patched_content = patched_content[:match_declare_args.end('body_content')] + f"{indent_level_declare_args}  visual_studio_runtime_dirs = []\n" + patched_content[match_declare_args.end('body_content'):]
+                    modified = True
+                
+                if modified:
+                    log("INFO", f"Ensured dummy VS values in 'declare_args()' in '{vs_version_gni_path.name}' as a fallback.", to_console=True)
+            else:
+                log("FATAL", f"Could not find 'declare_args()' block in '{vs_version_gni_path.name}' for fallback patching. This is unexpected.", to_console=True)
+                return False
+
 
         if modified:
             vs_version_gni_path.write_text(patched_content, encoding="utf-8")
@@ -569,7 +610,6 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
         log("FATAL", "Failed to patch 'build/dotfile_settings.gni'. Aborting.", to_console=True)
         sys.exit(1)
     
-    # NEW: Call to patch build/config/win/visual_studio_version.gni
     log("INFO", "Calling patch for 'build/config/win/visual_studio_version.gni'.", to_console=True)
     if not _patch_visual_studio_version_gni(v8_source_dir, env):
         log("FATAL", "Failed to patch 'build/config/win/visual_studio_version.gni'. Aborting.", to_console=True)
