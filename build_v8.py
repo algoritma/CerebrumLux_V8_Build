@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v6.5 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v6.6 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 - MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -21,9 +21,7 @@ CerebrumLux V8 Build Automation v6.5 (Final Robust MinGW Build - Incorporating a
 - FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
 - FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
 - FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN DELETING original GetVisualStudioVersion(), DetectVisualStudioPath(), AND SetEnvironmentAndGetRuntimeDllDirs() bodies, resolving IndentationError and NameError.
-- FIX: Added explicit dummy return scope for SetEnvironmentAndGetRuntimeDllDirs() in vs_toolchain.py shim to resolve 'No value named "vs_path" in scope "toolchain_data"' error during 'gn gen'.
-- FIX: Included 'path' key in SetEnvironmentAndGetRuntimeDllDirs() return for robust GN compatibility.
-- FIX: Added 'DEPOT_TOOLS_WIN_TOOLCHAIN=0' to SetEnvironmentAndGetRuntimeDllDirs() shim for explicit MinGW-only build.
+- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to provide dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, bypassing 'No value named "vs_path" in scope "toolchain_data"' error during 'gn gen'.
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
 - FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
@@ -285,7 +283,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v6.5) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v6.6) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -307,9 +305,9 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "    # Return a dummy scope for GN scripts, defining expected variables.\n"
             "    import os\n"
             "    os.environ['GYP_MSVS_OVERRIDE_PATH'] = DetectVisualStudioPath()\n"
-            "    os.environ['DEPOT_TOOLS_WIN_TOOLCHAIN'] = '0'\n" # Explicitly disable VS toolchain search in script context
+            "    os.environ['DEPOT_TOOLS_WIN_TOOLCHAIN'] = '0'\n"
             "    return {\n"
-            "        'path': DetectVisualStudioPath(),\n" # Added 'path' key
+            "        'path': DetectVisualStudioPath(),\n"
             "        'vs_path': DetectVisualStudioPath(),\n"
             "        'sdk_path': r'',\n"
             "        'wdk_path': r'',\n"
@@ -319,7 +317,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "# --- CerebrumLux injected shim END ---\n\n"
         )
 
-        if f"# --- CerebrumLux injected shim START (v6.5) ---" not in text:
+        if f"# --- CerebrumLux injected shim START (v6.6) ---" not in text:
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -364,7 +362,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             return True
         else:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
-            if f"# --- CerebrumLux injected shim START (v6.5) ---" not in text:
+            if f"# --- CerebrumLux injected shim START (v6.6) ---" not in text:
                 log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
@@ -434,11 +432,71 @@ def _patch_dotfile_settings_gni(v8_source_dir: str, env: dict) -> bool:
         log("ERROR", f"Failed to patch '{dotfile_settings_path.name}': {e}", to_console=True)
         return False
 
+def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
+    """
+    Patches V8_SRC/build/config/win/visual_studio_version.gni to provide dummy values
+    for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs.
+    """
+    vs_version_gni_path = Path(v8_source_dir) / "build" / "config" / "win" / "visual_studio_version.gni"
+    if not vs_version_gni_path.exists():
+        log("WARN", f"'{vs_version_gni_path.name}' not found at {vs_version_gni_path}. Skipping patch.", to_console=True)
+        return False
+
+    log("INFO", f"Patching '{vs_version_gni_path.name}' to bypass Visual Studio detection.", to_console=True)
+    try:
+        content = vs_version_gni_path.read_text(encoding="utf-8")
+        patched_content = content
+        modified = False
+
+        # Remove the import line for toolchain_data.gni as we are bypassing it.
+        import_toolchain_data_pattern = r"^\s*import\s*\(\"//build/toolchain/win/toolchain_data\.gni\"\)\s*\n"
+        if re.search(import_toolchain_data_pattern, patched_content, re.MULTILINE):
+            patched_content = re.sub(import_toolchain_data_pattern, r"# CerebrumLux neutralized: \g<0>", patched_content, flags=re.MULTILINE)
+            modified = True
+            log("INFO", f"Neutralized 'import(\"//build/toolchain/win/toolchain_data.gni\")' in '{vs_version_gni_path.name}'.", to_console=False)
+
+        # Find the declare_args() block and replace its contents with our dummy values.
+        # This regex needs to be careful not to match other declare_args blocks, though unlikely here.
+        # It looks for 'declare_args() {' and tries to find its matching '}' by indentation/structure.
+        declare_args_block_pattern = r"(?P<start>^\s*declare_args\s*\(\s*\)\s*\{\n)(?P<body_content>(?:^\s*(?!\s*\}\s*$|\s*declare_args).*?\n)*?)(?P<end>^\s*\}\s*$)"
+        match = re.search(declare_args_block_pattern, patched_content, re.MULTILINE | re.DOTALL)
+
+        if match:
+            indent_level = match.group('start').splitlines()[0].split('declare_args')[0] # Indentation before declare_args
+            
+            new_declare_args_body = f"""{indent_level}  # CerebrumLux MinGW patch: Force dummy VS paths/versions to bypass detection errors.
+{indent_level}  visual_studio_path = ""
+{indent_level}  visual_studio_version = "16.0" # A dummy but valid-looking version
+{indent_level}  visual_studio_runtime_dirs = []
+"""
+            # Replace the original body within the declare_args block
+            patched_content = patched_content[:match.start('body_content')] + new_declare_args_body + patched_content[match.end('body_content'):]
+            modified = True
+            log("INFO", f"Replaced 'declare_args()' content with dummy VS values in '{vs_version_gni_path.name}'.", to_console=True)
+        else:
+            log("WARN", f"Could not find 'declare_args()' block in '{vs_version_gni_path.name}'. Skipping replacement.", to_console=True)
+
+        if modified:
+            vs_version_gni_path.write_text(patched_content, encoding="utf-8")
+            log("INFO", f"'{vs_version_gni_path.name}' patched successfully.", to_console=True)
+            run(["git", "add", str(vs_version_gni_path)], cwd=v8_source_dir, env=env, check=False)
+            log("INFO", f"Staged '{vs_version_gni_path.name}' changes with 'git add'.", to_console=True)
+            return True
+        else:
+            log("INFO", f"'{vs_version_gni_path.name}' already patched or no changes needed.", to_console=False)
+            run(["git", "add", str(vs_version_gni_path)], cwd=v8_source_dir, env=env, check=False)
+            log("INFO", f"Ensured '{vs_version_gni_path.name}' is staged with 'git add'.", to_console=True)
+            return True
+
+    except Exception as e:
+        log("ERROR", f"Failed to patch '{vs_version_gni_path.name}': {e}", to_console=True)
+        return False
+
 
 def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
     """
     Patches the DEPS file to remove problematic dependencies for MinGW build.
-    Also calls to patch the 'build/dotfile_settings.gni' file.
+    Also calls to patch the 'build/dotfile_settings.gni' and 'visual_studio_version.gni' files.
     """
     deps_path = os.path.join(v8_source_dir, "DEPS")
     if not os.path.exists(deps_path):
@@ -510,6 +568,12 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
     if not _patch_dotfile_settings_gni(v8_source_dir, env):
         log("FATAL", "Failed to patch 'build/dotfile_settings.gni'. Aborting.", to_console=True)
         sys.exit(1)
+    
+    # NEW: Call to patch build/config/win/visual_studio_version.gni
+    log("INFO", "Calling patch for 'build/config/win/visual_studio_version.gni'.", to_console=True)
+    if not _patch_visual_studio_version_gni(v8_source_dir, env):
+        log("FATAL", "Failed to patch 'build/config/win/visual_studio_version.gni'. Aborting.", to_console=True)
+        sys.exit(1)
 
 
 def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: int = MAX_GCLIENT_RETRIES):
@@ -545,7 +609,7 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
 
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               f"# --- CerebrumLux injected shim START (v6.5) ---" not in content_before_patch)
+                               f"# --- CerebrumLux injected shim START (v6.6) ---" not in content_before_patch)
 
                 if not needs_patch:
                     log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim is present. Pre-sync patch skipped (already fine).", to_console=False)
@@ -636,7 +700,7 @@ def run_gn_gen(env):
     log("INFO", f"GN generated build files in {OUT_DIR}.")
 
 def run_ninja_build(env):
-    ninja_bin = shutil.which("ninja") or os.path.join(DEPOT_TOOLS, "ninja")
+    ninja_bin = shutil.which("ninja") or os.os.path.join(DEPOT_TOOLS, "ninja")
     if not ninja_bin:
         raise RuntimeError("ninja binary not found in PATH nor in depot_tools.")
     run([ninja_bin, "-C", OUT_DIR, NINJA_TARGET], cwd=V8_SRC, env=env)
@@ -681,7 +745,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v6.5
+# Auto-generated by CerebrumLux V8 Builder v6.6
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -745,7 +809,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v6.5 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v6.6 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
