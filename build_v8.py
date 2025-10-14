@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.1 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.2 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -30,6 +30,7 @@ CerebrumLux V8 Build Automation v7.1 (Final Robust MinGW Build - Incorporating a
 - NEW: More robust GN/Ninja binary detection using _find_tool helper function.
 - NEW: Improved onerror function for Windows compatibility using stat.S_IWRITE.
 - FIX (v7.1): Corrected vs_toolchain.py shim and visual_studio_version.gni patches to provide *non-empty dummy paths* for wdk_path, sdk_path, and visual_studio_path to bypass GN assertions requiring non-empty values when Visual Studio is conceptually "set".
+- FIX (v7.2): Resolved NameError: name 'vs_toolchain' is not defined by consistently using 'vs_toolchain_path.name' in log messages within gclient_sync_with_retry function.
 """
 import os
 import sys
@@ -334,15 +335,23 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "# --- CerebrumLux injected shim END ---\n\n"
         )
 
-        if f"# --- CerebrumLux injected shim START (v7.1) ---" not in text: # Updated shim version marker for check
+        # Check for the *current* shim version. If it's not present, or if an older version is, apply.
+        if f"# --- CerebrumLux injected shim START (v7.1) ---" not in text: 
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
         else:
             log("DEBUG", f"CerebrumLux shim already present in '{vs_toolchain_path.name}', skipping prepend.", to_console=False)
-            # Re-check and update shim content if old version is present but content differs.
-            # This is a bit more complex. For now, we assume if marker exists, content is correct.
-            # A more robust solution would be to check the *exact* shim block content.
+            # A more robust check for existing shim content: if the shim marker is there,
+            # but the content itself is outdated or incorrect (e.g., empty paths),
+            # we consider it 'modified' and rewrite.
+            if any(s in text for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
+                log("WARN", f"Outdated CerebrumLux shim detected with empty paths in '{vs_toolchain_path.name}'. Re-applying full shim.", to_console=False)
+                # Remove old shim first (basic approach)
+                text = re.sub(r"# --- CerebrumLux injected shim START \(v[\d\.]+\) ---[\s\S]*?# --- CerebrumLux injected shim END ---", "", text, flags=re.MULTILINE)
+                text = shim_block + text
+                modified = True
+
 
         func_patterns_to_remove = [
             r"^(def\s+DetectVisualStudioPath\s*\([^)]*\):(?:\n\s+.*)*?\n)(?=\n?^def|\Z)",
@@ -370,8 +379,9 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         if modified:
             try:
+                # Only create backup if file was actually modified
                 bak_path = vs_toolchain_path.with_suffix(vs_toolchain_path.suffix + ".cerebrumlux.bak")
-                if not bak_path.exists():
+                if not bak_path.exists() or original_text != text: # Ensure backup is of original before *this* run's changes, or if new content
                     bak_path.write_bytes(original_text.encode("utf-8", errors="replace"))
                     log("DEBUG", f"Created backup of original '{vs_toolchain_path.name}' at '{bak_path.name}'.", to_console=False)
             except Exception as e:
@@ -407,6 +417,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
     except Exception as e:
         log("ERROR", f"Failed to apply aggressive patch logic to '{vs_toolchain_path.name}': {e}", to_console=False)
         return False
+
 
 def _patch_dotfile_settings_gni(v8_source_dir: str, env: dict) -> bool:
     """
@@ -662,7 +673,7 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
             f.write(patched_content)
         log("INFO", f"DEPS file patched successfully to remove problematic MinGW dependencies and apply mirrors.", to_console=True)
     else:
-        log("INFO", f"DEPS file already patched or no problematic dependencies found.", to_console=False)
+        log("INFO", f"DEPS file already patched or no problematic dependencies found.", to_console=True) # Changed to to_console=True for confirmation
 
     log("INFO", "Calling patch for 'build/dotfile_settings.gni'.", to_console=True)
     if not _patch_dotfile_settings_gni(v8_source_dir, env):
@@ -678,14 +689,13 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
 def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: int = MAX_GCLIENT_RETRIES):
     """Runs gclient sync with retries and error handling, aggressively patching vs_toolchain.py before each attempt and after if needed."""
     gclient_py_path = Path(DEPOT_TOOLS) / "gclient.py"
-    # NEW: Check if gclient is in PATH as gclient.bat or gclient
+    # Check if gclient is in PATH as gclient.bat or gclient
+    gclient_to_use = []
     if not gclient_py_path.exists():
         gclient_cmd_in_path = shutil.which("gclient") or shutil.which("gclient.bat")
         if gclient_cmd_in_path:
-            # If found in PATH, use the discovered command directly.
-            # cmd_base will be adjusted below to use this.
             log("INFO", f"Found gclient in PATH: {gclient_cmd_in_path}", to_console=False)
-            gclient_to_use = [str(gclient_cmd_in_path)] # Make it a list to prepend
+            gclient_to_use = [str(gclient_cmd_in_path)]
         else:
             raise RuntimeError(f"gclient.py not found at {gclient_py_path} nor in system PATH. Ensure depot_tools is correctly cloned and configured.")
     else:
@@ -694,7 +704,6 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
     
     vs_toolchain_path = Path(v8_src_dir) / "build" / "vs_toolchain.py"
 
-    # Construct cmd_base based on how gclient_to_use was determined
     cmd_base = gclient_to_use + ["sync", "-D", "--with_branch_heads", "--with_tags", "--force"]
     
     for attempt in range(1, retries + 1):
@@ -702,7 +711,7 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
             log("INFO", f"gclient sync attempt {attempt}/{retries}.")
             
             patch_tries = 0
-            MAX_PATCH_LOOP_TRIES = 10
+            MAX_PATCH_LOOP_TRIES_INNER = 5 # User suggested 5 retries for patching loop
             
             while True:
                 current_vs_toolchain_exists = vs_toolchain_path.exists()
@@ -710,28 +719,27 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                     log("DEBUG", f"'{vs_toolchain_path.name}' does not exist yet. Cannot apply pre-sync patch. Continuing...", to_console=False)
                     break
 
-                if patch_tries >= MAX_PATCH_LOOP_TRIES:
-                    log("FATAL", f"'{vs_toolchain_path.name}' still contains problematic VS detection logic or missing shim after {MAX_PATCH_LOOP_TRIES} pre-sync patch attempts. Aborting.", to_console=True)
+                if patch_tries >= MAX_PATCH_LOOP_TRIES_INNER:
+                    log("FATAL", f"'{vs_toolchain_path.name}' still contains problematic VS detection logic or missing shim after {MAX_PATCH_LOOP_TRIES_INNER} pre-sync patch attempts. Aborting.", to_console=True)
                     sys.exit(1)
                 
                 content_before_patch = ""
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Check for critical strings that indicate patching is needed or shim is not current (v7.1)
+                # Combined check for critical strings (pipes, VS exception) and v7.1 shim content
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
                                f"# --- CerebrumLux injected shim START (v7.1) ---" not in content_before_patch or
-                               r"wdk_path': r''" in content_before_patch or
+                               r"wdk_path': r''" in content_before_patch or # Check for empty paths from older shim
                                r"sdk_path': r''" in content_before_patch or
                                r"DetectVisualStudioPath():\n    return r''" in content_before_patch)
 
-
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain.py}' does not contain critical strings and shim (v7.1) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.1) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.1 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.1 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -888,7 +896,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.1
+# Auto-generated by CerebrumLux V8 Builder v7.2
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -922,7 +930,6 @@ file(COPY ${{V8_HEADERS_TO_COPY}} DESTINATION ${{CURRENT_PACKAGES_DIR}}/include/
 # Handle copyright
 file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/share/${{PORT}}" RENAME copyright)
 """
-    # cmake_content = cmake_content.replace('${V8_ROOT}', V8_ROOT.replace('\\', '/')) # Removed as it's directly embedded now
     with open(portfile_path, "w", encoding="utf-8") as f:
         f.write(cmake_content)
     log("INFO", f"Updated {portfile_path}")
@@ -953,7 +960,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v7.1 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.2 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
