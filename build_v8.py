@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v6.6 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v6.7 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 - MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -21,7 +21,7 @@ CerebrumLux V8 Build Automation v6.6 (Final Robust MinGW Build - Incorporating a
 - FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
 - FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
 - FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN DELETING original GetVisualStudioVersion(), DetectVisualStudioPath(), AND SetEnvironmentAndGetRuntimeDllDirs() bodies, resolving IndentationError and NameError.
-- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, bypassing 'No value named "vs_path" in scope "toolchain_data"' error during 'gn gen'.
+- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, AND COMMENTING OUT the exec_script call that fetches toolchain_data.
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
 - FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
@@ -141,7 +141,8 @@ def run(cmd_list, cwd=None, env=None, check=True, capture_output=True):
     Run a shell command. Returns subprocess.CompletedProcess or raises.
     `cmd_list` should be a list of arguments for shell=False.
     """
-    cmd_str = ' '.join(cmd_list) if isinstance(cmd_list, list) else cmd_list
+    # FIX: Corrected cmd_str initialization for robustness
+    cmd_str = ' '.join(cmd_list) if isinstance(cmd_list, list) else str(cmd_list)
     log("INFO", f"RUN: {cmd_str} (CWD: {cwd or os.getcwd()})", to_console=False)
     try:
         cp = subprocess.run(cmd_list, cwd=cwd, env=env, shell=False, # shell=False for list of commands
@@ -283,7 +284,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v6.6) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v6.7) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -317,7 +318,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "# --- CerebrumLux injected shim END ---\n\n"
         )
 
-        if f"# --- CerebrumLux injected shim START (v6.6) ---" not in text:
+        if f"# --- CerebrumLux injected shim START (v6.7) ---" not in text:
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -362,7 +363,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             return True
         else:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
-            if f"# --- CerebrumLux injected shim START (v6.6) ---" not in text:
+            if f"# --- CerebrumLux injected shim START (v6.7) ---" not in text:
                 log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
@@ -443,7 +444,7 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
         log("WARN", f"'{vs_version_gni_path.name}' not found at {vs_version_gni_path}. Skipping patch.", to_console=True)
         return False
 
-    log("INFO", f"Patching '{vs_version_gni_path.name}' to bypass Visual Studio detection.", to_console=True)
+    log("INFO", f"Patching '{vs_version_gni_path.name}' to bypass Visual Studio detection (direct assignment).", to_console=True)
     try:
         content = vs_version_gni_path.read_text(encoding="utf-8")
         patched_content = content
@@ -455,67 +456,42 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
             patched_content = re.sub(import_toolchain_data_pattern, r"# CerebrumLux neutralized: \g<0>", patched_content, flags=re.MULTILINE)
             modified = True
             log("INFO", f"Neutralized 'import(\"//build/toolchain/win/toolchain_data.gni\")' in '{vs_version_gni_path.name}'.", to_console=False)
-
-        # 2. Find and remove/replace the 'if (host_os == "win") { ... }' block
-        # that contains the exec_script call and assignments to VS variables.
-        # This regex needs to capture the whole block reliably.
-        if_host_os_win_block_pattern = re.compile(
-            r"(^\s*if\s+\(host_os\s*==\s*\"win\"\)\s*\{\n)" + # Start of the if block
-            r"(?P<block_content>(?:^\s*(?:#.*)?\n?)*?" + # Match lines within the block, including comments and empty lines
-            r"^\s*toolchain_data\s*=\s*exec_script\s*\(\"..\s*/../vs_toolchain\.py\"[\s\S]*?" + # The problematic exec_script call
-            r"^\s*visual_studio_path\s*=\s*toolchain_data\.vs_path[\s\S]*?" + # Assignment lines
-            r"^\s*visual_studio_version\s*=\s*toolchain_data\.version[\s\S]*?" +
-            r"^\s*visual_studio_runtime_dirs\s*=\s*toolchain_data\.runtime_dirs[\s\S]*?)" + # End of assignments
-            r"(^\s*\})" # Closing brace of the if block
-            , re.MULTILINE | re.DOTALL
+        
+        # 2. Neutralize the 'exec_script' call that populates toolchain_data.
+        # This is the primary source of the 'toolchain_data' dependency.
+        exec_script_pattern = re.compile(
+            r"^(?P<indent>\s*)(?:toolchain_data\s*=\s*)?exec_script\s*\(\"..\s*/../vs_toolchain\.py\"[\s\S]*?\)\s*\n",
+            re.MULTILINE | re.DOTALL
         )
-        match_if_block = re.search(if_host_os_win_block_pattern, patched_content)
-
-        if match_if_block:
-            log("INFO", "Found and neutralizing 'if (host_os == \"win\") {' block containing VS detection logic.", to_console=False)
-            
-            indent_level = re.match(r"^\s*", match_if_block.group(1), re.MULTILINE).group(0) # Indent of the if statement
-            
-            # Create replacement block: set fixed values directly
-            replacement_block = f"""{indent_level}# CerebrumLux MinGW patch: Force dummy VS paths/versions to bypass detection errors.
-{indent_level}if (host_os == "win") {{
-{indent_level}  visual_studio_path = ""
-{indent_level}  visual_studio_version = "16.0"
-{indent_level}  visual_studio_runtime_dirs = []
-{indent_level}}}
-"""
-            # Replace the entire original if block with our simplified one.
-            patched_content = patched_content[:match_if_block.start()] + replacement_block + patched_content[match_if_block.end():]
+        # FIX: Use the compiled pattern's .sub() method directly, without passing flags again.
+        if exec_script_pattern.search(patched_content):
+            patched_content = exec_script_pattern.sub(r"\g<indent># CerebrumLux neutralized: \g<0>", patched_content)
             modified = True
-            log("INFO", f"Successfully replaced 'if (host_os == \"win\") {{...}}' block with dummy VS values in '{vs_version_gni_path.name}'.", to_console=True)
-        else:
-            log("WARN", f"Could not find specific 'if (host_os == \"win\") {{...}}' block to patch. Attempting to ensure declare_args has values.", to_console=True)
-            # Fallback: if the specific if block is not found, ensure declare_args has the values.
-            # This is less ideal but provides a fallback for unexpected file structures.
-            declare_args_block_pattern = re.compile(r"(^\s*declare_args\s*\(\s*\)\s*\{\n)(?P<body_content>[\s\S]*?)(^\s*\}\s*$)", re.MULTILINE | re.DOTALL)
-            match_declare_args = re.search(declare_args_block_pattern, patched_content)
+            log("INFO", f"Neutralized 'exec_script(\"../../vs_toolchain.py\"...)' call in '{vs_version_gni_path.name}'.", to_console=False)
 
-            if match_declare_args:
-                current_declare_args_body = match_declare_args.group('body_content')
-                indent_level_declare_args = re.match(r"^\s*", match_declare_args.group(1), re.MULTILINE).group(0)
-                
-                # Check and insert if not present
-                if 'visual_studio_path =' not in current_declare_args_body:
-                    patched_content = patched_content[:match_declare_args.end('body_content')] + f"{indent_level_declare_args}  visual_studio_path = \"\"\n" + patched_content[match_declare_args.end('body_content'):]
-                    modified = True
-                if 'visual_studio_version =' not in current_declare_args_body:
-                    patched_content = patched_content[:match_declare_args.end('body_content')] + f"{indent_level_declare_args}  visual_studio_version = \"16.0\"\n" + patched_content[match_declare_args.end('body_content'):]
-                    modified = True
-                if 'visual_studio_runtime_dirs =' not in current_declare_args_body:
-                    patched_content = patched_content[:match_declare_args.end('body_content')] + f"{indent_level_declare_args}  visual_studio_runtime_dirs = []\n" + patched_content[match_declare_args.end('body_content'):]
-                    modified = True
-                
-                if modified:
-                    log("INFO", f"Ensured dummy VS values in 'declare_args()' in '{vs_version_gni_path.name}' as a fallback.", to_console=True)
-            else:
-                log("FATAL", f"Could not find 'declare_args()' block in '{vs_version_gni_path.name}' for fallback patching. This is unexpected.", to_console=True)
-                return False
+        # 3. Find and replace *all* assignments to visual_studio_path, visual_studio_version, visual_studio_runtime_dirs
+        assignments_to_patch = {
+            "visual_studio_path": '""',
+            "visual_studio_version": '"16.0"',
+            "visual_studio_runtime_dirs": '[]'
+        }
 
+        for var, dummy_value in assignments_to_patch.items():
+            # Match the variable assignment. This regex is robust against whitespace and different RHS values.
+            # It captures the indentation to preserve it.
+            assignment_pattern = re.compile(rf"^(?P<indent>\s*){var}\s*=\s*.*$", re.MULTILINE)
+            
+            initial_var_content = patched_content
+            while True:
+                # FIX: Use the compiled pattern's .sub() method directly, without passing flags again.
+                new_content_after_sub = assignment_pattern.sub(rf"\g<indent>{var} = {dummy_value} # CerebrumLux MinGW patch", patched_content)
+                if new_content_after_sub == patched_content:
+                    break
+                patched_content = new_content_after_sub
+                modified = True
+                log("INFO", f"Replaced assignment for '{var}' with dummy value in '{vs_version_gni_path.name}'.", to_console=False)
+            if initial_var_content != patched_content:
+                modified = True
 
         if modified:
             vs_version_gni_path.write_text(patched_content, encoding="utf-8")
@@ -649,7 +625,7 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
 
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               f"# --- CerebrumLux injected shim START (v6.6) ---" not in content_before_patch)
+                               f"# --- CerebrumLux injected shim START (v6.7) ---" not in content_before_patch)
 
                 if not needs_patch:
                     log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim is present. Pre-sync patch skipped (already fine).", to_console=False)
@@ -740,7 +716,7 @@ def run_gn_gen(env):
     log("INFO", f"GN generated build files in {OUT_DIR}.")
 
 def run_ninja_build(env):
-    ninja_bin = shutil.which("ninja") or os.os.path.join(DEPOT_TOOLS, "ninja")
+    ninja_bin = shutil.which("ninja") or os.path.join(DEPOT_TOOLS, "ninja")
     if not ninja_bin:
         raise RuntimeError("ninja binary not found in PATH nor in depot_tools.")
     run([ninja_bin, "-C", OUT_DIR, NINJA_TARGET], cwd=V8_SRC, env=env)
@@ -785,7 +761,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v6.6
+# Auto-generated by CerebrumLux V8 Builder v6.7
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -849,7 +825,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v6.6 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v6.7 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
