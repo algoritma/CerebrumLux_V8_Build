@@ -20,7 +20,7 @@ CerebrumLux V8 Build Automation v6.3 (Final Robust MinGW Build - Incorporating a
 - FIX: Added GitHub mirror for 'simdutf' and 'zlib' in DEPS patching to mitigate HTTP 429 rate limit.
 - FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
 - FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
-- FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN REMOVING original GetVisualStudioVersion() and DetectVisualStudioPath() bodies, resolving IndentationError and NameError.
+- FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN DELETING original GetVisualStudioVersion() and DetectVisualStudioPath() bodies, resolving IndentationError and NameError.
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
 - FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
@@ -141,7 +141,7 @@ def run(cmd_list, cwd=None, env=None, check=True, capture_output=True):
     Run a shell command. Returns subprocess.CompletedProcess or raises.
     `cmd_list` should be a list of arguments for shell=False.
     """
-    cmd_str = ' '.join(cmd_list) if isinstance(cmd_list, list) else cmd_list
+    cmd_str = ' '.join(cmd_list) if isinstance(cmd_list, list) else cmd_str
     log("INFO", f"RUN: {cmd_str} (CWD: {cwd or os.getcwd()})", to_console=False)
     try:
         cp = subprocess.run(cmd_list, cwd=cwd, env=env, shell=False, # shell=False for list of commands
@@ -321,14 +321,31 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # --- Aggressively REMOVE/COMMENT OUT original function definitions ---
         # Pattern to find a function definition and its entire body.
         # This is crucial to prevent IndentationError and NameError.
-        func_body_pattern = r"(def\s+(DetectVisualStudioPath|GetVisualStudioVersion)\s*\([\s\S]*?:\n)(?P<body_content>(?:\s+.*?\n)*?)(?=\n^def|\Z)"
+        # This regex now targets the whole 'def ...:\n' part and its indented body.
+        func_body_pattern = r"^(def\s+(DetectVisualStudioPath|GetVisualStudioVersion)\s*\([^)]*\):(?:\n\s+.*)*?\n)(?=\n?^def|\Z)"
         
-        # Replace original GetVisualStudioVersion and DetectVisualStudioPath definitions with comments.
-        initial_func_replace_text = text # Store for comparison
-        text = re.sub(func_body_pattern, r"# CerebrumLux neutralized original function: \1# \g<body_content>", text, flags=re.MULTILINE)
-        if initial_func_replace_text != text:
+        # We need to apply this iteratively as re.sub with MULTILINE and DOTALL might behave unexpectedly
+        # if the function bodies are not perfectly separated or if multiple functions are in scope.
+        # A safer approach is to find all matches and build the new text.
+
+        # Temporarily store original content to re-process for removals after prepend.
+        content_after_prepend = text 
+        
+        # Remove original GetVisualStudioPath and DetectVisualStudioPath definitions.
+        # Use a loop to find and remove all instances in case of multiple matches (unlikely, but robust).
+        matches_found = 0
+        while True:
+            match = re.search(func_body_pattern, content_after_prepend, re.MULTILINE)
+            if match:
+                content_after_prepend = content_after_prepend[:match.start()] + content_after_prepend[match.end():]
+                matches_found += 1
+            else:
+                break
+        
+        if matches_found > 0:
+            text = content_after_prepend
             modified = True
-            log("INFO", f"Neutralized original DetectVisualStudioPath/GetVisualStudioVersion function bodies in '{vs_toolchain_path.name}'.", to_console=False)
+            log("INFO", f"Removed {matches_found} original DetectVisualStudioPath/GetVisualStudioVersion function bodies in '{vs_toolchain_path.name}'.", to_console=False)
 
 
         # Additionally remove deprecated 'import pipes' occurrences elsewhere to avoid confusion.
@@ -363,8 +380,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             if "# --- CerebrumLux injected shim START (v6.3) ---" not in text: # Check for the updated shim marker
                 log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
-            # Ensure original definitions are actually removed or commented out.
-            if re.search(func_body_pattern, text):
+            # Ensure original definitions are actually removed.
+            if re.search(func_body_pattern, text): # Check again for any remaining original function bodies
                 log("ERROR", f"'{vs_toolchain_path.name}' still contains original function definitions despite patching. Patching is NOT sticking.", to_console=False)
                 return False
             if "import pipes" in text and not ("# import pipes (replaced by CerebrumLux shim)" in text):
@@ -472,7 +489,7 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
         patched_content = re.sub(r"['\"]tools/win['\"]\s*:\s*['\"][^'\"]*['\"],?\n?", "", patched_content)
         deps_modified = True
     
-    # NEW FIX: Remove 'tools/clang' from DEPS to prevent 429 rate limit errors for this submodule
+    # FIX: Remove 'tools/clang' from DEPS to prevent 429 rate limit errors for this submodule
     log("INFO", "Removing 'tools/clang' from DEPS.", to_console=False)
     if re.search(r"['\"]tools/clang['\"]\s*:\s*['\"][^'\"]*['\"],?\n?", patched_content):
         patched_content = re.sub(r"['\"]tools/clang['\"]\s*:\s*['\"][^'\"]*['\"],?\n?", "", patched_content)
@@ -553,6 +570,7 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
                 # Check for "import pipes" or the original problematic exception string, AND for our shim
+                # Updated shim marker check to v6.3
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
                                "# --- CerebrumLux injected shim START (v6.3) ---" not in content_before_patch) # If our shim isn't there, it needs patching
@@ -790,6 +808,7 @@ def main():
         write_gclient_file(V8_ROOT, V8_GIT_URL)
 
         # Step 3: Run the initial gclient sync to clone V8 and fetch core dependencies.
+        # This sync will now ensure vs_toolchain.py is patched before and after each retry internally.
         log("STEP", "Running initial gclient sync to clone V8 and fetch core dependencies.")
         gclient_sync_with_retry(env, V8_ROOT, V8_SRC)
         
