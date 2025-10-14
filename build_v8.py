@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v6.9 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.0 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 - MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -332,7 +332,6 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "# --- CerebrumLux injected shim END ---\n\n"
         )
 
-        # Check for the updated shim marker (v6.9)
         if f"# --- CerebrumLux injected shim START (v6.9) ---" not in text:
             text = shim_block + text
             modified = True
@@ -340,7 +339,6 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         else:
             log("DEBUG", f"CerebrumLux shim already present in '{vs_toolchain_path.name}', skipping prepend.", to_console=False)
 
-        # --- Aggressively REMOVE original function definitions ---
         func_patterns_to_remove = [
             r"^(def\s+DetectVisualStudioPath\s*\([^)]*\):(?:\n\s+.*)*?\n)(?=\n?^def|\Z)",
             r"^(def\s+GetVisualStudioVersion\s*\([^)]*\):(?:\n\s+.*)*?\n)(?=\n?^def|\Z)",
@@ -628,7 +626,7 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
             # If found in PATH, use the discovered command directly.
             # cmd_base will be adjusted below to use this.
             log("INFO", f"Found gclient in PATH: {gclient_cmd_in_path}", to_console=False)
-            gclient_to_use = str(gclient_cmd_in_path)
+            gclient_to_use = [str(gclient_cmd_in_path)] # Make it a list to prepend
         else:
             raise RuntimeError(f"gclient.py not found at {gclient_py_path} nor in system PATH. Ensure depot_tools is correctly cloned and configured.")
     else:
@@ -638,10 +636,7 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
     vs_toolchain_path = Path(v8_src_dir) / "build" / "vs_toolchain.py"
 
     # Construct cmd_base based on how gclient_to_use was determined
-    if isinstance(gclient_to_use, list): # If it's [sys.executable, path/to/gclient.py]
-        cmd_base = gclient_to_use + ["sync", "-D", "--with_branch_heads", "--with_tags", "--force"]
-    else: # If it's just "gclient" or "gclient.bat"
-        cmd_base = [gclient_to_use, "sync", "-D", "--with_branch_heads", "--with_tags", "--force"]
+    cmd_base = gclient_to_use + ["sync", "-D", "--with_branch_heads", "--with_tags", "--force"]
     
     for attempt in range(1, retries + 1):
         try:
