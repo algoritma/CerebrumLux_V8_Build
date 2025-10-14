@@ -21,7 +21,7 @@ CerebrumLux V8 Build Automation v6.8 (Final Robust MinGW Build - Incorporating a
 - FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
 - FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
 - FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN DELETING original GetVisualStudioVersion(), DetectVisualStudioPath(), AND SetEnvironmentAndGetRuntimeDllDirs() bodies, resolving IndentationError and NameError.
-- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, AND COMMENTING OUT the exec_script call that fetches toolchain_data. Also fixed re.sub flags issue.
+- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, AND COMMENTING OUT the exec_script call that fetches toolchain_data. Also fixed re.sub flags issue and regex character set issue.
 - FIX: Corrected cmd_str initialization in run() helper and os.os.path in run_ninja_build().
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
@@ -464,6 +464,7 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
             re.MULTILINE | re.DOTALL
         )
         if exec_script_pattern.search(patched_content):
+            # FIX: Use the compiled pattern's .sub() method directly, without passing flags again.
             patched_content = exec_script_pattern.sub(r"\g<indent># CerebrumLux neutralized: \g<0>", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script(\"../../vs_toolchain.py\"...)' call in '{vs_version_gni_path.name}'.", to_console=False)
@@ -476,9 +477,8 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
         }
 
         for var, dummy_value in assignments_to_patch.items():
-            # Match the variable assignment. This regex is robust against whitespace and different RHS values.
-            # It captures the indentation to preserve it.
-            assignment_pattern = re.compile(rf"^(?P<indent>\s*){var}\s*=\s*.*$", re.MULTILINE)
+            # FIX: Escape the variable name to prevent regex errors if it contains special characters.
+            assignment_pattern = re.compile(rf"^(?P<indent>\s*){re.escape(var)}\s*=\s*.*$", re.MULTILINE)
             
             initial_var_content = patched_content
             while True:
@@ -492,7 +492,6 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
                     log("INFO", f"Replaced assignment for '{var}' with dummy value in '{vs_version_gni_path.name}'.", to_console=False)
             
             # If the variable was not found as an assignment, try to inject it as a declare_args.
-            # This is a fallback in case it's dynamically set or conditional.
             if not re.search(rf"^\s*{var}\s*=\s*{dummy_value}", patched_content, re.MULTILINE) and \
                not re.search(rf"^\s*{var}\s*=\s*[\s\S]*?# CerebrumLux MinGW patch", patched_content, re.MULTILINE): # Check if already explicitly patched
                 declare_args_block_pattern = re.compile(r"(^\s*declare_args\s*\(\s*\)\s*\{\n)(?P<body_content>[\s\S]*?)(^\s*\}\s*$)", re.MULTILINE | re.DOTALL)
