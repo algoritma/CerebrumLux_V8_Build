@@ -21,12 +21,14 @@ CerebrumLux V8 Build Automation v6.9 (Final Robust MinGW Build - Incorporating a
 - FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
 - FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
 - FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN DELETING original GetVisualStudioVersion(), DetectVisualStudioPath(), AND SetEnvironmentAndGetRuntimeDllDirs() bodies, resolving IndentationError and NameError.
-- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, AND COMMENTING OUT the exec_script call that fetches toolchain_data. Also fixed re.sub flags issue in assignment_pattern loop.
-- FIX: Corrected cmd_str initialization in run() helper and os.os.path in run_ninja_build().
+- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, AND COMMENTING OUT the exec_script call that fetches toolchain_data. Also fixed re.sub flags issue and regex character set issue.
+- FIX: Corrected cmd_str initialization in run() helper and os.path.join in run_ninja_build().
 - FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
 - FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
 - FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
 - NEW: Disabled aggressive removal of V8_ROOT at start of script to allow incremental updates and prevent repeated full downloads.
+- NEW: More robust GN/Ninja binary detection using _find_tool helper function.
+- NEW: Improved onerror function for Windows compatibility using stat.S_IWRITE.
 """
 import os
 import sys
@@ -99,9 +101,17 @@ def onerror(func, path, exc_info):
     Error handler for shutil.rmtree.
     If the error is due to an access problem (e.g. file locked),
     it changes the file's permissions to allow removal.
+    Uses stat.S_IWRITE for better Windows compatibility.
     """
     if not os.access(path, os.W_OK):
-        os.chmod(path, stat.S_IWUSR)
+        try:
+            os.chmod(path, stat.S_IWRITE) # Use S_IWRITE for Windows.
+        except Exception:
+            # Fallback for other potential issues or if S_IWRITE fails
+            try:
+                os.chmod(path, stat.S_IWUSR)
+            except Exception:
+                pass
         func(path)
     else:
         raise
@@ -141,6 +151,7 @@ def run(cmd_list, cwd=None, env=None, check=True, capture_output=True):
     """
     Run a shell command. Returns subprocess.CompletedProcess or raises.
     `cmd_list` should be a list of arguments for shell=False.
+    Captures stdout/stderr as DEBUG logs if capture_output is True.
     """
     # FIX: Corrected cmd_str initialization for robustness
     cmd_str = ' '.join(cmd_list) if isinstance(cmd_list, list) else str(cmd_list)
@@ -150,6 +161,7 @@ def run(cmd_list, cwd=None, env=None, check=True, capture_output=True):
                             check=check, text=True, capture_output=capture_output,
                             encoding='utf-8', errors='replace') # errors='replace' for problematic output
         if capture_output:
+            # DEBUG logs for stdout/stderr to avoid overwhelming console/INFO log
             if cp.stdout:
                 log("DEBUG", f"STDOUT:\n{cp.stdout}", to_console=False)
             if cp.stderr:
@@ -202,6 +214,7 @@ def prepare_subprocess_env():
 # === Git helpers (with retries + proxy fallback) ===
 # ----------------------------
 def git_configure_proxy(env, proxy_url):
+    """Configures Git's global HTTP/S proxy settings."""
     if proxy_url:
         log("INFO", f"Setting Git proxy to: {proxy_url}", to_console=False)
         run(['git', 'config', '--global', 'http.proxy', proxy_url], env=env, check=False, capture_output=False)
@@ -212,6 +225,7 @@ def git_configure_proxy(env, proxy_url):
         run(['git', 'config', '--global', '--unset', 'https.proxy'], env=env, check=False, capture_output=False)
 
 def git_fetch_and_reset(env, repo_dir, ref, remote="origin"):
+    """Performs a git fetch, checkout, and hard reset for a given repository and ref."""
     for attempt in range(1, GIT_RETRY + 1):
         try:
             log("INFO", f"Git fetch/reset attempt {attempt}/{GIT_RETRY} for {repo_dir} @ {ref}.")
@@ -229,6 +243,7 @@ def git_fetch_and_reset(env, repo_dir, ref, remote="origin"):
                 raise
 
 def git_clone_with_retry(env, target_dir, url):
+    """Clones a Git repository with retries and proxy fallbacks."""
     for proxy_url in PROXY_FALLBACKS:
         try:
             git_configure_proxy(env, proxy_url)
@@ -252,9 +267,7 @@ def git_clone_with_retry(env, target_dir, url):
 # === gclient helpers ===
 # ----------------------------
 def write_gclient_file(root_dir, url):
-    """
-    Write a .gclient file in the root directory.
-    """
+    """Writes a .gclient file in the root directory."""
     gclient_content = (
         "solutions = [\n"
         "  {\n"
@@ -285,7 +298,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v6.8) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v6.9) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -319,13 +332,15 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "# --- CerebrumLux injected shim END ---\n\n"
         )
 
-        if f"# --- CerebrumLux injected shim START (v6.8) ---" not in text:
+        # Check for the updated shim marker (v6.9)
+        if f"# --- CerebrumLux injected shim START (v6.9) ---" not in text:
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
         else:
             log("DEBUG", f"CerebrumLux shim already present in '{vs_toolchain_path.name}', skipping prepend.", to_console=False)
 
+        # --- Aggressively REMOVE original function definitions ---
         func_patterns_to_remove = [
             r"^(def\s+DetectVisualStudioPath\s*\([^)]*\):(?:\n\s+.*)*?\n)(?=\n?^def|\Z)",
             r"^(def\s+GetVisualStudioVersion\s*\([^)]*\):(?:\n\s+.*)*?\n)(?=\n?^def|\Z)",
@@ -364,7 +379,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             return True
         else:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
-            if f"# --- CerebrumLux injected shim START (v6.8) ---" not in text:
+            if f"# --- CerebrumLux injected shim START (v6.9) ---" not in text:
                 log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
@@ -606,12 +621,27 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
 def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: int = MAX_GCLIENT_RETRIES):
     """Runs gclient sync with retries and error handling, aggressively patching vs_toolchain.py before each attempt and after if needed."""
     gclient_py_path = Path(DEPOT_TOOLS) / "gclient.py"
+    # NEW: Check if gclient is in PATH as gclient.bat or gclient
     if not gclient_py_path.exists():
-        raise RuntimeError(f"gclient.py not found at {gclient_py_path}. Ensure depot_tools is correctly cloned.")
+        gclient_cmd_in_path = shutil.which("gclient") or shutil.which("gclient.bat")
+        if gclient_cmd_in_path:
+            # If found in PATH, use the discovered command directly.
+            # cmd_base will be adjusted below to use this.
+            log("INFO", f"Found gclient in PATH: {gclient_cmd_in_path}", to_console=False)
+            gclient_to_use = str(gclient_cmd_in_path)
+        else:
+            raise RuntimeError(f"gclient.py not found at {gclient_py_path} nor in system PATH. Ensure depot_tools is correctly cloned and configured.")
+    else:
+        # If gclient.py exists directly, we'll use sys.executable to run it.
+        gclient_to_use = [sys.executable, str(gclient_py_path)]
     
     vs_toolchain_path = Path(v8_src_dir) / "build" / "vs_toolchain.py"
 
-    cmd_base = [sys.executable, str(gclient_py_path), "sync", "-D", "--with_branch_heads", "--with_tags", "--force"]
+    # Construct cmd_base based on how gclient_to_use was determined
+    if isinstance(gclient_to_use, list): # If it's [sys.executable, path/to/gclient.py]
+        cmd_base = gclient_to_use + ["sync", "-D", "--with_branch_heads", "--with_tags", "--force"]
+    else: # If it's just "gclient" or "gclient.bat"
+        cmd_base = [gclient_to_use, "sync", "-D", "--with_branch_heads", "--with_tags", "--force"]
     
     for attempt in range(1, retries + 1):
         try:
@@ -681,7 +711,28 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
 # ----------------------------
 # === Build steps ===
 # ----------------------------
+def _find_tool(names: list) -> str:
+    """
+    Searches for a tool (like gn or ninja) in PATH and then in DEPOT_TOOLS.
+    Returns the full path to the tool or None if not found.
+    """
+    for n in names:
+        path = shutil.which(n)
+        if path:
+            log("DEBUG", f"Found tool '{n}' in PATH: {path}", to_console=False)
+            return path
+    
+    for n in names:
+        p = os.path.join(DEPOT_TOOLS, n)
+        if os.path.exists(p):
+            log("DEBUG", f"Found tool '{n}' in DEPOT_TOOLS: {p}", to_console=False)
+            return p
+    
+    log("ERROR", f"Tool not found among candidates: {names}", to_console=False)
+    return None
+
 def ensure_depot_tools(env):
+    """Ensures depot_tools is cloned and functional."""
     if os.path.isdir(DEPOT_TOOLS):
         log("INFO", f"depot_tools exists at {DEPOT_TOOLS}")
         return
@@ -691,6 +742,7 @@ def ensure_depot_tools(env):
     log("INFO", "depot_tools cloned.")
 
 def write_args_gn(out_dir):
+    """Writes the args.gn file for the GN build configuration."""
     os.makedirs(out_dir, exist_ok=True)
     mingw_for = MINGW_BIN.replace("\\", "/")
     args_content = (
@@ -719,7 +771,8 @@ def write_args_gn(out_dir):
     log("INFO", f"args.gn written to {p}")
 
 def run_gn_gen(env):
-    gn_bin = shutil.which("gn") or os.path.join(DEPOT_TOOLS, "gn")
+    """Generates Ninja build files using GN."""
+    gn_bin = _find_tool(["gn", "gn.exe"]) # Use _find_tool
     if not gn_bin:
         raise RuntimeError("gn binary not found in PATH nor in depot_tools.")
     
@@ -727,13 +780,15 @@ def run_gn_gen(env):
     log("INFO", f"GN generated build files in {OUT_DIR}.")
 
 def run_ninja_build(env):
-    ninja_bin = shutil.which("ninja") or os.path.join(DEPOT_TOOLS, "ninja")
+    """Starts the main V8 compilation with Ninja."""
+    ninja_bin = _find_tool(["ninja", "ninja.exe"]) # Use _find_tool
     if not ninja_bin:
         raise RuntimeError("ninja binary not found in PATH nor in depot_tools.")
     run([ninja_bin, "-C", OUT_DIR, NINJA_TARGET], cwd=V8_SRC, env=env)
     log("INFO", f"Ninja build of '{NINJA_TARGET}' completed.")
 
 def copy_to_vcpkg():
+    """Copies compiled V8 artifacts (lib and headers) to vcpkg's installed directory."""
     target_lib_dir = os.path.join(VCPKG_ROOT, "installed", "x64-mingw-static", "lib")
     target_include_dir = os.path.join(VCPKG_ROOT, "installed", "x64-mingw-static", "include")
     os.makedirs(target_lib_dir, exist_ok=True)
@@ -766,13 +821,14 @@ def copy_to_vcpkg():
     log("INFO", f"V8 lib + headers copied into vcpkg installed tree ({target_lib_dir}, {target_include_dir})")
 
 def update_vcpkg_port(version, ref, homepage, license):
+    """Updates or creates the vcpkg portfile and manifest for V8."""
     port_v8_dir = os.path.join(VCPKG_ROOT, "ports", "v8")
     os.makedirs(port_v8_dir, exist_ok=True)
     portfile_path = os.path.join(port_v8_dir, "portfile.cmake")
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v6.8
+# Auto-generated by CerebrumLux V8 Builder v6.9
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -824,6 +880,7 @@ file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/s
     log("INFO", f"Created/updated {manifest_path}")
 
 def vcpkg_integrate_install(env):
+    """Runs 'vcpkg integrate install' for system-wide CMake integration."""
     vcpkg_exe = os.path.join(VCPKG_ROOT, "vcpkg.exe")
     if not os.path.exists(vcpkg_exe):
         log("WARN", f"vcpkg.exe not found at {vcpkg_exe}, skipping 'vcpkg integrate install'.")
@@ -836,7 +893,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v6.8 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v6.9 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
