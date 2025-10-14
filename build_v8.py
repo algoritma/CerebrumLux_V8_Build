@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.3 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.4 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -32,6 +32,7 @@ CerebrumLux V8 Build Automation v7.3 (Final Robust MinGW Build - Incorporating a
 - FIX (v7.1): Corrected vs_toolchain.py shim and visual_studio_version.gni patches to provide *non-empty dummy paths* for wdk_path, sdk_path, and visual_studio_path to bypass GN assertions requiring non-empty values when Visual Studio is conceptually "set".
 - FIX (v7.2): Resolved NameError: name 'vs_toolchain' is not defined by consistently using 'vs_toolchain_path.name' in log messages within gclient_sync_with_retry function.
 - FIX (v7.3): Add patch for 'build/toolchain/win/setup_toolchain.py' to bypass calls to vs_toolchain.DetectVisualStudioPath and vs_toolchain.GetVisualStudioVersion to resolve AttributeError.
+- FIX (v7.4): Corrected indentation in 'setup_toolchain.py' patch to resolve 'IndentationError: unexpected indent'.
 """
 import os
 import sys
@@ -302,7 +303,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         # FIX (v7.1): Changed wdk_path, sdk_path, and DetectVisualStudioPath to non-empty dummy paths.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.2) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.3) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -337,32 +338,29 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         )
 
         # Check for the *current* shim version. If it's not present, or if an older version is, apply.
-        if f"# --- CerebrumLux injected shim START (v7.2) ---" not in text: 
+        if f"# --- CerebrumLux injected shim START (v7.3) ---" not in text: 
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
         else:
             log("DEBUG", f"CerebrumLux shim already present in '{vs_toolchain_path.name}', skipping prepend.", to_console=False)
-            # A more robust check for existing shim content: if the shim marker is there,
-            # but the content itself is outdated or incorrect (e.g., empty paths),
-            # we consider it 'modified' and rewrite.
-            if any(s in text for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                log("WARN", f"Outdated CerebrumLux shim detected with empty paths in '{vs_toolchain_path.name}'. Re-applying full shim.", to_console=False)
-                # Remove old shim first (basic approach)
-                # This regex needs to be careful not to remove other important parts of the file.
-                # It's better to replace the *entire file* content if an outdated shim is detected.
-                # For now, let's just prepend and let the existing logic remove old function bodies.
-                # A full replacement logic for outdated shims is safer.
-                
-                # More robust way: if old shim is found, remove it and re-prepend.
-                # This prevents duplicate shims and ensures the latest content.
-                old_shim_pattern = re.compile(r"# --- CerebrumLux injected shim START \(v[\d\.]+\) ---[\s\S]*?# --- CerebrumLux injected shim END ---\n\n", re.MULTILINE)
-                if old_shim_pattern.search(text):
-                    text = old_shim_pattern.sub("", text)
-                    log("DEBUG", f"Removed old CerebrumLux shim from '{vs_toolchain_path.name}' for re-application.", to_console=False)
-                
-                text = shim_block + text
+            
+            # More robust way: if old shim is found, remove it and re-prepend.
+            # This prevents duplicate shims and ensures the latest content.
+            old_shim_pattern = re.compile(r"# --- CerebrumLux injected shim START \(v[\d\.]+\) ---[\s\S]*?# --- CerebrumLux injected shim END ---\n\n", re.MULTILINE)
+            if old_shim_pattern.search(text):
+                text = old_shim_pattern.sub("", text)
+                log("DEBUG", f"Removed old CerebrumLux shim from '{vs_toolchain_path.name}' for re-application.", to_console=False)
+                text = shim_block + text # Re-prepend the latest shim
                 modified = True
+            else: # If a previous CerebrumLux shim marker exists but wasn't caught by old_shim_pattern, it means the pattern might not match perfectly.
+                  # As a fallback, check for content of previous versions.
+                if any(s in text for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''", r"# --- CerebrumLux injected shim START (v7.0) ---"]):
+                    log("WARN", f"Outdated CerebrumLux shim content or old version marker detected in '{vs_toolchain_path.name}'. Re-applying full shim.", to_console=False)
+                    # Aggressively remove any previous CerebrumLux shim markers and re-prepend
+                    text = re.sub(r"# --- CerebrumLux injected shim START \(v[\d\.]+\) ---[\s\S]*?# --- CerebrumLux injected shim END ---\n\n", "", text, flags=re.MULTILINE)
+                    text = shim_block + text
+                    modified = True
 
 
         func_patterns_to_remove = [
@@ -406,8 +404,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             # Re-verify if the shim is still correct in case no 'modified' flag was set (e.g., if re-running)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.2) ---" not in current_content:
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.2) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.3) ---" not in current_content:
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.3) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -421,7 +419,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 return False
             # Also explicitly check the dummy paths within the shim for consistency (v7.1 check)
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.2 content missing).", to_console=False)
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.3 content missing).", to_console=False)
                  return False
             
             return True
@@ -626,7 +624,7 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
         log("WARN", f"'{setup_toolchain_path.name}' not found at {setup_toolchain_path}. Skipping patch.", to_console=True)
         return False
 
-    log("INFO", f"Patching '{setup_toolchain_path.name}' to bypass vs_toolchain calls.", to_console=True)
+    log("INFO", f"Patching '{setup_toolchain_path.name}' to bypass vs_toolchain calls and fix indentation.", to_console=True)
     try:
         content = setup_toolchain_path.read_text(encoding="utf-8")
         patched_content = content
@@ -635,26 +633,28 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
         # Patch _DetectVisualStudioPath
         # Original: return vs_toolchain.DetectVisualStudioPath()
         # New: return 'C:\\FakeVS' # CerebrumLux MinGW patch
-        pattern_detect_vs_path = re.compile(r"^\s*return\s+vs_toolchain\.DetectVisualStudioPath\(\)\s*$", re.MULTILINE)
+        # FIX (v7.4): Capture indentation and re-use it.
+        pattern_detect_vs_path = re.compile(r"^(?P<indent>\s*)return\s+vs_toolchain\.DetectVisualStudioPath\(\)\s*$", re.MULTILINE)
         if pattern_detect_vs_path.search(patched_content):
             patched_content = pattern_detect_vs_path.sub(
-                r"    return r'C:\\FakeVS' # CerebrumLux MinGW patch", # Ensure correct indentation
+                r"\g<indent>return r'C:\\FakeVS' # CerebrumLux MinGW patch", # Re-use captured indentation
                 patched_content
             )
             modified = True
-            log("INFO", f"Patched '_DetectVisualStudioPath' call in '{setup_toolchain_path.name}'.", to_console=False)
+            log("INFO", f"Patched '_DetectVisualStudioPath' call in '{setup_toolchain_path.name}' (indentation fixed).", to_console=False)
         
         # Patch _GetVisualStudioVersion (if it exists and calls vs_toolchain.GetVisualStudioVersion)
         # Original: return vs_toolchain.GetVisualStudioVersion()
         # New: return '16.0' # CerebrumLux MinGW patch
-        pattern_get_vs_version = re.compile(r"^\s*return\s+vs_toolchain\.GetVisualStudioVersion\(\)\s*$", re.MULTILINE)
+        # FIX (v7.4): Capture indentation and re-use it.
+        pattern_get_vs_version = re.compile(r"^(?P<indent>\s*)return\s+vs_toolchain\.GetVisualStudioVersion\(\)\s*$", re.MULTILINE)
         if pattern_get_vs_version.search(patched_content):
             patched_content = pattern_get_vs_version.sub(
-                r"    return '16.0' # CerebrumLux MinGW patch", # Ensure correct indentation
+                r"\g<indent>return '16.0' # CerebrumLux MinGW patch", # Re-use captured indentation
                 patched_content
             )
             modified = True
-            log("INFO", f"Patched '_GetVisualStudioVersion' call in '{setup_toolchain_path.name}'.", to_console=False)
+            log("INFO", f"Patched '_GetVisualStudioVersion' call in '{setup_toolchain_path.name}' (indentation fixed).", to_console=False)
 
         if modified:
             try:
@@ -811,17 +811,17 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Combined check for critical strings (pipes, VS exception) and v7.2 shim content
+                # Combined check for critical strings (pipes, VS exception) and v7.3 shim content
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               f"# --- CerebrumLux injected shim START (v7.2) ---" not in content_before_patch or
+                               f"# --- CerebrumLux injected shim START (v7.3) ---" not in content_before_patch or
                                any(s in content_before_patch for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]))
 
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.2) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.3) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.2 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.3 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -978,7 +978,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.3
+# Auto-generated by CerebrumLux V8 Builder v7.4
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1042,7 +1042,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v7.3 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.4 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
