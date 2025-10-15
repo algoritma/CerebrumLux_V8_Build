@@ -846,7 +846,8 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
 
         # --- Aggressively strip any orphaned commas or square brackets that might cause syntax errors (e.g., from removing items from a list) ---
         # FIX (v7.37.7): Only target isolated commas, not closing brackets. Removing ']' or '}' is almost always incorrect.
-        orphaned_punctuation_pattern = re.compile(r"^\s*,\s*$", re.MULTILINE)         initial_orphaned_content = patched_content
+        orphaned_punctuation_pattern = re.compile(r"^\s*,\s*$", re.MULTILINE)
+        initial_orphaned_content = patched_content
         replacement_str = r""
         log("DEBUG", f"Pattern: {orphaned_punctuation_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
         patched_content = orphaned_punctuation_pattern.sub(replacement_str, patched_content)
