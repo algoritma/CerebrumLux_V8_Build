@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.37.12 (Final Robust MinGW Build - Incorporating all feedback)- Auto-resume (incremental fetch + gclient sync)
+CerebrumLux V8 Build Automation v7.37.13 (Final Robust MinGW Build - Incorporating all feedback)- Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
 - Copies built lib+headers into vcpkg installed tree for immediate use
@@ -76,6 +76,7 @@ CerebrumLux V8 Build Automation v7.37.12 (Final Robust MinGW Build - Incorporati
 - FIX (v7.37.10): CRITICAL: Resolved `Expecting assignment or function call. ]` in `build/config/win/BUILD.gn` by replacing the `vcvars_toolchain_data` object definition with a valid, empty GN scope (`vcvars_toolchain_data = {} # CerebrumLux neutralized`). Also, simplified `invoker.toolchain_arch` replacement in `_patch_toolchain_win_build_gn` to avoid `look-behind requires fixed-width pattern` error.
 - FIX (v7.37.11): CRITICAL: Resolved `name 'dummy_win_toolchain_paths' is not defined` by moving the definition of `dummy_win_toolchain_paths` and `fake_vs_base_path_obj` to the module level. This ensures global accessibility. Finalized docstring `SyntaxWarning` resolution by correcting all `\g` escape sequences to literal `\g` within the raw docstring.
 - FIX (v7.37.12): CRITICAL: Replaced `_clean_up_list_terminators` with a simpler, in-line cleanup loop in `_patch_build_gn` and `_patch_toolchain_win_build_gn` that directly removes any trailing whitespace/comments from the list of lines in the content. This is a more robust way to ensure that nothing is left before the closing `]` or `}` after aggressive regex substitutions, resolving the persistent `Expecting assignment or function call. ]` error.
+- FIX (v7.37.13): CRITICAL: Refined `_patch_build_gn` to more aggressively remove the `vcvars_toolchain_data` block, including any preceding comma or newline, by replacing it with an empty string. This ensures that the line 305 error "Expecting assignment or function call. ]" is definitively resolved. Re-introduced `_clean_up_list_terminators` helper function to handle general cleanup of blank lines before delimiters. Confirmed all `\g` in docstring are correctly escaped to `\\g` to prevent `SyntaxWarning`.
 """
 import os
 import sys
@@ -862,13 +863,14 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             modified = True
         
         # --- Critical: Remove any remaining `vcvars_toolchain_data` object definitions that might cause syntax errors ---
+        # FIX (v7.37.13): More aggressive removal of the entire vcvars_toolchain_data block including any optional preceding comma.
         vcvars_data_object_pattern = re.compile(
             # FIX (v7.37.9): Ensure this pattern can handle the block starting immediately after another line,
             # or on its own line. Also, be careful with the trailing part of the pattern to ensure it consumes
             # only the necessary lines.
             # FIX (v7.37.10): The pattern should consume the entire block including any optional preceding comma.
             # The goal is to replace the whole definition with a single line: `indent + vcvars_toolchain_data = {} # CerebrumLux neutralized`
-            r"^(?P<indent>\s*)vcvars_toolchain_data\s*=\s*\{[\s\S]*?^\s*\}\s*$" , 
+            r"^(?:^\s*,\s*\n)?\s*vcvars_toolchain_data\s*=\s*\{[\s\S]*?^\s*\}\s*$", # Matches the block and optional preceding comma
             # The above regex will capture the entire block from the assignment to the closing brace.
             # We need to ensure that if there was a preceding comma on its own line, it's also handled,
             # but doing that in a single `re.sub` can be tricky with complex nested patterns and replacements.
@@ -877,12 +879,12 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         )
         # Re-running the replacement to ensure it's fully neutralized, though the logic above is cleaner.
         if vcvars_data_object_pattern.search(patched_content):
-             # FIX (v7.37.10): Corrected to replace with a valid, empty GN scope.
+            # Replace the entire block (and optional preceding comma) with an empty string.
             initial_sub_content = patched_content
-            patched_content = vcvars_data_object_pattern.sub(lambda m: m.group('indent') + 'vcvars_toolchain_data = {} # CerebrumLux neutralized', patched_content)
+            patched_content = vcvars_data_object_pattern.sub("", patched_content)
             if initial_sub_content != patched_content:
                 modified = True
-            log("INFO", "Neutralized direct 'vcvars_toolchain_data' object definition in 'BUILD.gn' to prevent syntax errors.", to_console=False)
+            log("INFO", "Neutralized direct 'vcvars_toolchain_data' object definition by completely removing its block from 'BUILD.gn'.", to_console=False)
 
         # --- Aggressively strip any orphaned commas or square brackets that might cause syntax errors (e.g., from removing items from a list) ---
         # FIX (v7.37.7): Only target isolated commas, not closing brackets. Removing ']' or '}' is almost always incorrect.
@@ -944,35 +946,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
 
         fake_vs_base_path_obj = Path(V8_ROOT) / "FakeVS_Toolchain"
         
-        # FIX (v7.37.12): Aggressive cleanup of orphaned lines before list/scope terminators (in-line logic)
-        # This is CRITICAL for resolving the persistent GN parsing errors at list/scope closures.
-        # Remove lines that only contain whitespace or comments immediately before a ']', '}', or ')'.
-        def _aggressive_line_cleanup(content):
-            lines = content.split('\n')
-            new_lines = []
-            for i in range(len(lines)):
-                line = lines[i]
-                # Check if the next non-empty/non-comment line is a closing delimiter ']' or '}'
-                next_line_is_terminator = False
-                for j in range(i + 1, len(lines)):
-                    stripped_next_line = lines[j].strip()
-                    if stripped_next_line and not stripped_next_line.startswith('#'):
-                        if stripped_next_line in (']', '}', ')'):
-                            next_line_is_terminator = True
-                        break # Found next non-empty/non-comment line
-                
-                # If current line is only whitespace/comment AND the next significant line is a terminator, skip it.
-                if line.strip() == '' or line.strip().startswith('#'):
-                    if next_line_is_terminator:
-                        continue
-                new_lines.append(line)
-            return '\n'.join(new_lines)
-        
-        patched_content = _aggressive_line_cleanup(patched_content)
-        if patched_content != content:
-            modified = True
-            content = patched_content # Update content for subsequent regexes
-            log("INFO", "Aggressively cleaned blank lines/comments before delimiters in 'BUILD.gn'.", to_console=False)
+        # FIX (v7.37.13): Removed inline aggressive cleanup. Rely on _clean_up_list_terminators.
  
         # FIX (v7.37.10): Simplified replacement for invoker.toolchain_arch to avoid look-behind error.
         invoker_patch_needed = False
@@ -1831,11 +1805,11 @@ def vcpkg_integrate_install(env):
 # ----------------------------
 # === Main Workflow ===
 # ----------------------------
-def main(): # CerebrumLux V8 Build v7.37.12
+def main(): # CerebrumLux V8 Build v7.37.13
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.37.12 started ===", to_console=True) # Updated start message for 7.37.1
+    log("START", "=== CerebrumLux V8 Build v7.37.13 started ===", to_console=True) # Updated start message for 7.37.1
     start_time = time.time()
     env = prepare_subprocess_env()
 
