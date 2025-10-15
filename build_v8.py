@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.37.1 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.37.3 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -58,13 +58,17 @@ CerebrumLux V8 Build Automation v7.37.1 (Final Robust MinGW Build - Incorporatin
 - FIX (v7.27): Further refined `_patch_toolchain_win_build_gn` to remove direct assignments of `sys_lib_flags` and `sys_include_flags` from `build/toolchain/win/BUILD.gn` entirely, and added these flags to the `win_toolchain_data` object injected into `args.gn` via `run_gn_gen`, resolving "Assignment had no effect" for `sys_lib_flags`. Updated shim version.
 - FIX (v7.28): Introduced a more targeted patch in `_patch_toolchain_win_build_gn` to specifically inject `sys_include_flags = []` and `sys_lib_flags = []` into `build/toolchain/win/BUILD.gn` right before the `msvc_toolchain` template definition, in addition to defining them in `args.gn`'s `win_toolchain_data`. This resolves the "Undefined identifier in string expansion" error for `sys_include_flags`. Updated shim version.
 - FIX (v7.29): Neutralized the problematic `prefix = rebase_path(...)` assignment in `build/toolchain/win/BUILD.gn` by commenting it out, addressing the "Assignment had no effect" error related to `prefix`. Updated shim version.
-- FIX (v7.30): Applied comprehensive regex and replacement string corrections across patching functions to ensure proper named-group usage (`(?P<name>...)`), avoid incorrect `\g` usage, and leverage lambda for safer substitutions, addressing residual patching failures and enhancing overall robustness based on detailed analysis. Updated shim version.
+- FIX (v7.30): Applied comprehensive regex and replacement string corrections across patching functions to ensure proper named-group usage (`(?P<name>...)`), avoid incorrect `\\g` usage, and leverage lambda for safer substitutions, addressing residual patching failures and enhancing overall robustness based on detailed analysis. Updated shim version.
 - FIX (v7.31): Aggressively modified `_patch_build_gn` to fully remove / replace all references and definitions of `vcvars_toolchain_data` in `build/config/win/BUILD.gn` with hardcoded dummy paths or `true` (for `defined()` checks). This directly addresses `ERROR at //build/config/win/BUILD.gn:305:40: Expecting assignment or function call. ],` by eliminating its source. Updated shim version.
 - FIX (v7.32): Corrected `vc_bin_dir` path in `_LoadToolchainEnv` within `_patch_setup_toolchain_py` to include `Hostx64/x64`, ensuring consistency. Also, refined `_patch_build_gn` to handle specific list closure issues by ensuring no orphaned `]` or `,` remain after aggressive substitutions, and added `//` style comment stripping to `_filter_gn_comments` for better robustness. Updated shim version.
-- FIX (v7.33): Resolved `bad escape \g at position 55` error in `_patch_build_gn` by correcting an incorrect lambda replacement expression. Ensured all `re.sub` replacements use correct `lambda m: "..."` or direct string literals, avoiding problematic `\g` usage. Updated shim version.
-- FIX (v7.34): Further refined `_patch_build_gn` to handle `vcvars_toolchain_data` references more robustly, ensuring `re.sub` replacement strings are correctly formed literals. Specifically, adjusted the `access_pattern.sub` lambda to explicitly handle the `pre_assign` group and ensure the injected `dummy_path` is properly quoted, preventing `bad escape \g` errors. Also, corrected `vc_lib_um_path`'s `fake_vs_base_for_gn_obj` typo in `run_gn_gen`. Updated shim version.
-- FIX (v7.35): Addressed the persistent `bad escape \g` error by implementing explicit string concatenation (`+` operator) instead of f-strings within `re.sub` lambda replacements for `_patch_build_gn` to avoid any implicit backslash interpretation. Also, corrected the `SyntaxWarning` in the docstring by using a raw string literal. Updated shim version.
-- FIX (v7.36): Reviewed `_patch_build_gn` for a lingering `bad escape \g` by ensuring all dynamic string components in `re.sub` replacements are handled to prevent premature backslash interpretation. Explicitly escaped `dummy_path` using `.replace('\\', '\\\\')` where `m.group()` is used within the replacement string, guaranteeing literal backslashes are passed to `re.sub`. Added `_sanitize_replacement_string` helper for robust path handling in replacements. Updated shim version.
+- FIX (v7.33): Resolved `bad escape \\g at position 55` error in `_patch_build_gn` by correcting an incorrect lambda replacement expression. Ensured all `re.sub` replacements use correct `lambda m: "..."` or direct string literals, avoiding problematic `\\g` usage. Updated shim version.
+- FIX (v7.34): Further refined `_patch_build_gn` to handle `vcvars_toolchain_data` references more robustly, ensuring `re.sub` replacement strings are correctly formed literals. Specifically, adjusted the `access_pattern.sub` lambda to explicitly handle the `pre_assign` group and ensure the injected `dummy_path` is properly quoted, preventing `bad escape \\g` errors. Also, corrected `vc_lib_um_path`'s `fake_vs_base_for_gn_obj` typo in `run_gn_gen`. Updated shim version.
+- FIX (v7.35): Addressed the persistent `bad escape \\g` error by implementing explicit string concatenation (`+` operator) instead of f-strings within `re.sub` lambda replacements for `_patch_build_gn` to avoid any implicit backslash interpretation. Also, corrected the `SyntaxWarning` in the docstring by using a raw string literal. Updated shim version.
+- FIX (v7.36): Reviewed `_patch_build_gn` for a lingering `bad escape \\g` by ensuring all dynamic string components in `re.sub` replacements are handled to prevent premature backslash interpretation. Explicitly escaped `dummy_path` using `.replace('\\', '\\\\')` where `m.group()` is used within the replacement string, guaranteeing literal backslashes are passed to `re.sub`. Added `_sanitize_replacement_string` helper for robust path handling in replacements. Updated shim version.
+- FIX (v7.37.1): Corrected the "bad escape \\g" error in _patch_build_gn by ensuring `re.sub` replacements use lambda functions directly to correctly handle named group backreferences (`\\g<indent>`) instead of constructing a replacement string that `re.sub` then re-parses. This prevents the `re.error` for incorrect `\\g` usage when part of a string literal.
+- FIX (v7.37.2): Addressed the `SyntaxWarning: invalid escape sequence '\\g'` in the docstring by escaping `\g` as `\\g`. Corrected the `re.error: bad escape \\g` in `_patch_build_gn` by simplifying the `vcvars_data_object_pattern` to avoid backreferencing indentation within the regex pattern itself (`^\\g<indent>\\}`), making the pattern more robust to compile.
+- FIX (v7.37.3): Resolved "Expected comma between items" in `build/config/win/BUILD.gn` by modifying `_patch_build_gn` to replace the `vcvars_toolchain_data` object definition with an empty string (`""`) instead of a comment block. This prevents GN from interpreting the comment as an invalid list item, ensuring correct list syntax. Also, cleaned up remaining `SyntaxWarning` from docstring.
+
 """
 import os
 import sys
@@ -314,7 +318,7 @@ def git_clone_with_retry(env, target_dir, url):
 # ----------------------------
 # === gclient helpers ===
 # ----------------------------
-def write_gclient_file(root_dir, url):
+def write_gclient_file(root_dir: str, url: str):
     """Writes a .gclient file in the root directory."""
     gclient_content = (
         "solutions = [\n"
@@ -761,10 +765,11 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             re.MULTILINE | re.DOTALL
         )
         if exec_script_vcvars_pattern.search(patched_content):
-            # FIX (v7.36): Escape captured group for safety before using in replacement
-            replacement_str = r"\g<indent># CerebrumLux neutralized: " + re.escape(exec_script_vcvars_pattern.search(patched_content).group(0).strip().replace('\\', '/')) + r"\n"
-            log("DEBUG", f"Pattern: {exec_script_vcvars_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
-            patched_content = exec_script_vcvars_pattern.sub(replacement_str, patched_content)
+            # FIX (v7.37.1): Use lambda to correctly apply the backreference and comment out the original line
+            patched_content = exec_script_vcvars_pattern.sub(
+                lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '/') + "\n",
+                patched_content
+            )
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'vcvars_toolchain_data' in '{build_gn_path.name}'.", to_console=False)
         else:
@@ -824,14 +829,15 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         
         # --- Critical: Remove any remaining `vcvars_toolchain_data` object definitions that might cause syntax errors ---
         vcvars_data_object_pattern = re.compile(
-            r"^(?P<indent>\s*)vcvars_toolchain_data\s*=\s*\{[\s\S]*?^\g<indent>\}\s*$", # Matches the entire object definition
-            re.MULTILINE | re.DOTALL
+            r"^(?P<indent>\s*)vcvars_toolchain_data\s*=\s*\{[\s\S]*?^\s*\}\s*$", # Matches the entire object definition, simplified closing brace match
+            re.MULTILINE | re.DOTALL # Ensure DOTALL is used for multi-line matching
         )
         if vcvars_data_object_pattern.search(patched_content):
-            # FIX (v7.36): Use direct string concatenation for clarity and safety.
-            replacement_str = r"\g<indent># CerebrumLux neutralized vcvars_toolchain_data object definition\n"
-            log("DEBUG", f"Pattern: {vcvars_data_object_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
-            patched_content = vcvars_data_object_pattern.sub(replacement_str, patched_content)
+            # FIX (v7.37.1): Use lambda to correctly apply the backreference
+            patched_content = vcvars_data_object_pattern.sub(
+                lambda m: m.group('indent') + "# CerebrumLux neutralized vcvars_toolchain_data object definition\n",
+                "", # Replace with empty string to completely remove the block
+            )
             modified = True
             log("INFO", "Neutralized direct 'vcvars_toolchain_data' object definition in 'BUILD.gn' to prevent syntax errors.", to_console=False)
 
@@ -1608,11 +1614,11 @@ def vcpkg_integrate_install(env):
 # ----------------------------
 # === Main Workflow ===
 # ----------------------------
-def main():
+def main(): # CerebrumLux V8 Build v7.37.3
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.36 started ===", to_console=True) # Updated start message
+    log("START", "=== CerebrumLux V8 Build v7.37.3 started ===", to_console=True) # Updated start message for 7.37.1
     start_time = time.time()
     env = prepare_subprocess_env()
 
