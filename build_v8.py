@@ -280,7 +280,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         # FIX (v7.1): Changed wdk_path, sdk_path, and DetectVisualStudioPath to non-empty dummy paths.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.24 ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.22) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -1501,7 +1501,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.23 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.24 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
