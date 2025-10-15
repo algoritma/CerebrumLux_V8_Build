@@ -14,6 +14,10 @@
 ## 🇹🇷 Türkçe Açıklama
 
 ### 🎯 Amaç
+Betik, Google'ın V8 JavaScript motorunu Windows üzerinde standart Visual Studio derleyicisi yerine MinGW araç zincirini kullanarak derlemek için tasarlanmış özel bir otomasyon aracıdır. Bu, V8'in resmi derleme sürecinin dışına çıktığı için oldukça karmaşık bir işlemdir. Betik, bu uyumluluğu sağlamak için V8'in derleme yapılandırma dosyalarını yoğun bir şekilde "yamalamaktadır" (patching).
+
+---
+
 Bu betik, Google V8 JavaScript motorunu **Windows + MinGW** ortamında tamamen otomatik olarak derlemek,
 yapılandırmak ve **vcpkg** ile bütünleştirmek amacıyla geliştirilmiştir.  
 Normalde V8 yalnızca Visual Studio + Clang ortamında derlenebilir; bu betik,
