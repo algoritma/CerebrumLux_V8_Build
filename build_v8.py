@@ -1,6 +1,7 @@
+python
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.18 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.19 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -47,6 +48,7 @@ CerebrumLux V8 Build Automation v7.18 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.16): Corrected `SyntaxError: closing parenthesis ')' does not match opening parenthesis '['` in `main()` function's `git reset` command. Updated shim version.
 - FIX (v7.17): Removed `/* ... */` style comments from `defined()` bypasses within `_patch_build_gn` function to comply with GN's strict `#` comment syntax, resolving `Invalid token` error. Updated shim version.
 - FIX (v7.18): Implemented a new patch function `_patch_toolchain_win_build_gn` to neutralize `win_toolchain_data = exec_script(...)` in `build/toolchain/win/BUILD.gn` and directly replace all accesses to `win_toolchain_data.<field>` with hardcoded dummy paths, addressing "No value named 'vc_bin_dir' in scope 'win_toolchain_data'" error. Also ensured dummy directories for these new paths are created. Updated shim version.
+- FIX (v7.19): Refined `_patch_toolchain_win_build_gn` to replace MSVC-specific tool definitions (`cl`, `link`, `lib`) directly with MinGW paths (or safe dummies) as literal strings, and implemented `_filter_gn_comments` to ensure strict GN comment syntax. Updated shim version.
 """
 import os
 import sys
@@ -328,7 +330,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         # FIX (v7.1): Changed wdk_path, sdk_path, and DetectVisualStudioPath to non-empty dummy paths.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.17) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.18) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -363,7 +365,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         )
 
         # Check for the *current* shim version. If it's not present, or if an older version is, apply.
-        if f"# --- CerebrumLux injected shim START (v7.17) ---" not in text: 
+        if f"# --- CerebrumLux injected shim START (v7.18) ---" not in text: 
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -429,8 +431,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             # Re-verify if the shim is still correct in case no 'modified' flag was set (e.g., if re-running)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.17) ---" not in current_content:
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.17) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.18) ---" not in current_content:
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.18) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -444,7 +446,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 return False
             # Also explicitly check the dummy paths within the shim for consistency (v7.1 check)
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.17 content missing).", to_console=False)
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.18 content missing).", to_console=False)
                  return False
             
             return True
@@ -911,7 +913,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
 
         # --- 2. Inject a direct definition for win_toolchain_data after neutralizing exec_script ---
         # Find the insertion point (right after the neutralized exec_script line, or at the top if not found)
-        match_exec_script = re.search(r"^(?P<indent>\s*)# CerebrumLux neutralized:\s*win_toolchain_data\s*=\s*exec_script", content, re.MULTILINE)
+        match_exec_script = re.search(r"^(?P<indent>\s*)# CerebrumLux neutralized:\s*win_toolchain_data\s*=\s*exec_script", patched_content, re.MULTILINE)
         
         insert_point = 0
         indent_level = ""
@@ -949,36 +951,51 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
             log("INFO", f"Direct 'win_toolchain_data' definition appears to be already present and correctly defined in '{toolchain_build_gn_path.name}'. Skipping injection.", to_console=False)
 
 
-        # --- 3. Replace any direct accesses to `win_toolchain_data.<field>` with hardcoded dummy paths ---
-        # This is a fallback/redundancy in case the direct scope definition isn't fully effective everywhere.
-        # It's less ideal than direct scope definition but robust.
-        # Let's ensure paths are directly used, even if within string concatenations.
-        for field, dummy_path in dummy_win_toolchain_paths.items():
-            # Regex to find direct access like `foo = win_toolchain_data.<field>`
-            # and replace it with `foo = "<dummy_path>"`
-            assignment_pattern = re.compile(
-                r"^(?P<indent>\s*)(?P<lhs>[a-zA-Z0-9_]+\s*=\s*)win_toolchain_data\." + re.escape(field) + r"(?P<rest>.*)$",
-                re.MULTILINE
-            )
-            initial_assignment_replace_text = patched_content
-            # Replace the right-hand side of assignments directly with the dummy path string
-            patched_content = assignment_pattern.sub(r'\g<indent>\g<lhs>"' + dummy_path + r'"\g<rest> # CerebrumLux MinGW patch', patched_content)
-            if initial_assignment_replace_text != patched_content:
-                modified = True
-                log("INFO", f"Replaced assignment for 'win_toolchain_data.{field}' with hardcoded dummy path in '{toolchain_build_gn_path.name}' (fallback).", to_console=False)
+        # --- 3. Replace specific tool definitions (e.g., `cl = ...`) directly ---
+        # These are found around lines 435 in build/toolchain/win/BUILD.gn for x64
+        # and similar lines for x86.
+        # We need to replace the entire assignment line to avoid nested interpolation issues.
 
-            # Regex to find occurrences within strings, like "${win_toolchain_data.vc_bin_dir}/cl.exe"
-            # This is tricky for GN string interpolation. For now, focus on direct assignments and hope interpolation works with hardcoded strings.
-            # A simpler, more robust replacement is just to replace the *reference* itself with the string.
+        mingw_bin_posix = Path(MINGW_BIN).as_posix()
+
+        tool_replacements = {
+            # This is the line that caused the error: cl = "${goma_prefix}\"${win_toolchain_data.vc_bin_dir}/cl.exe\""
+            r'cl\s*=\s*"\$\{\s*goma_prefix\s*\}\\"\$?\{\s*win_toolchain_data\.vc_bin_dir\s*\}\/cl\.exe\\""':
+                f'cl = "\"{mingw_bin_posix}/gcc.exe\""',
+            r'link\s*=\s*"\$\{\s*goma_prefix\s*\}\\"\$?\{\s*win_toolchain_data\.vc_bin_dir\s*\}\/link\.exe\\""':
+                f'link = "\"{mingw_bin_posix}/g++.exe\""', # Linker is g++ for MinGW
+            r'lib\s*=\s*"\$\{\s*goma_prefix\s*\}\\"\$?\{\s*win_toolchain_data\.vc_bin_dir\s*\}\/lib\.exe\\""':
+                f'lib = "\"{mingw_bin_posix}/ar.exe\""', # Archiver is ar for MinGW
+            # Add other tools if they cause issues:
+            # r'rc\s*=\s*"\$\{\s*goma_prefix\s*\}\\"\$?\{\s*win_toolchain_data\.vc_bin_dir\s*\}\/rc\.exe\\""':
+            #     f'rc = "\"{mingw_bin_posix}/windres.exe\""', # Resource compiler
+        }
+        
+        for pattern_str, replacement_str in tool_replacements.items():
+            tool_pattern = re.compile(r"^\s*" + pattern_str, re.MULTILINE)
+            initial_tool_replace_text = patched_content
+            patched_content = tool_pattern.sub(r"  " + replacement_str, patched_content) # Preserve indentation.
+            if initial_tool_replace_text != patched_content:
+                modified = True
+                log("INFO", f"Replaced tool definition (pattern: {pattern_str[:min(len(pattern_str), 50)]}...) with MinGW path in '{toolchain_build_gn_path.name}'.", to_console=False)
+        
+        # Finally, replace any remaining generic references to win_toolchain_data.<field> if they were missed above
+        # This is a fallback to ensure no access goes unresolved.
+        for field, dummy_path in dummy_win_toolchain_paths.items():
+            # Match win_toolchain_data.<field> even if part of an interpolation string
+            # This will replace the *entire reference* with a quoted literal string
             generic_access_pattern = re.compile(r"win_toolchain_data\." + re.escape(field), re.MULTILINE)
             initial_generic_replace_text = patched_content
+            # Replace with a literal string, suitable for direct insertion or simple string concatenation
             patched_content = generic_access_pattern.sub(f'"{dummy_path}"', patched_content)
             if initial_generic_replace_text != patched_content:
                 modified = True
-                log("INFO", f"Replaced generic access to 'win_toolchain_data.{field}' with hardcoded dummy path in '{toolchain_build_gn_path.name}' (fallback).", to_console=False)
+                log("INFO", f"Replaced generic access to 'win_toolchain_data.{field}' with hardcoded dummy path in '{toolchain_build_gn_path.name}' (final fallback).", to_console=False)
 
 
         if modified:
+            # Apply general comment filter before writing back
+            patched_content = _filter_gn_comments(patched_content)
             try:
                 bak_path = toolchain_build_gn_path.with_suffix(toolchain_build_gn_path.suffix + ".cerebrumlux.bak")
                 if not bak_path.exists():
@@ -1003,11 +1020,63 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
         return False
 
 
+def _create_fake_vs_toolchain_dirs(v8_root_dir: str):
+    """
+    Creates dummy directories under V8_ROOT/FakeVS_Toolchain that GN
+    files might reference for existence checks.
+    """
+    fake_vs_base_path = Path(v8_root_dir) / "FakeVS_Toolchain"
+    
+    # Core VS paths
+    os.makedirs(fake_vs_base_path / "VC" / "bin", exist_ok=True)
+    os.makedirs(fake_vs_base_path / "VC" / "lib", exist_ok=True)
+    os.makedirs(fake_vs_base_path / "VC" / "include", exist_ok=True)
+    
+    # SDK paths
+    os.makedirs(fake_vs_base_path / "SDK", exist_ok=True)
+    os.makedirs(fake_vs_base_path / "SDK" / "lib", exist_ok=True)
+    os.makedirs(fake_vs_base_path / "SDK" / "include", exist_ok=True)
+
+    # Runtime and specific library paths referenced by GN
+    os.makedirs(fake_vs_base_path / "redist", exist_ok=True)
+    os.makedirs(fake_vs_base_path / "VC" / "Tools" / "Bin" / "Hostx64" / "x64", exist_ok=True) # For vc_bin_dir full path
+    os.makedirs(fake_vs_base_path / "VC" / "atlmfc" / "lib", exist_ok=True) # For vc_lib_atlmfc_path
+    os.makedirs(fake_vs_base_path / "VC" / "um" / "lib", exist_ok=True) # For vc_lib_um_path
+    os.makedirs(fake_vs_base_path / "VC" / "ucrt" / "lib", exist_ok=True) # For vc_lib_ucrt_path
+    
+    log("DEBUG", f"Ensured all dummy Visual Studio toolchain directories exist under {fake_vs_base_path.as_posix()}.", to_console=False)
+
+def _filter_gn_comments(content: str) -> str:
+    """
+    Filters GN file content to replace C-style comments (/* ... */) with #-style comments
+    and ensure only # is used for line comments.
+    """
+    # Replace block comments /* ... */ with # on each line, or remove them
+    # This regex is a bit simplistic and might not handle all edge cases of nested comments,
+    # but should cover the generated cases.
+    def replace_block_comment(match):
+        lines = match.group(0).splitlines()
+        # If it's a single-line block comment, replace with #
+        if len(lines) == 1:
+            return "#" + lines[0].strip().lstrip("/*").rstrip("*/")
+        # For multi-line, replace /* with # and remove */
+        # Or, just remove the entire block comment. For strict GN, removing is safer.
+        return "" # Remove block comments entirely for strict GN compliance.
+
+    # Remove /* ... */ block comments
+    content = re.sub(r"/\*[\s\S]*?\*/", replace_block_comment, content)
+    
+    # Ensure // comments are converted to #
+    # This might catch // within strings, but for GN files, it's unlikely to be problematic.
+    content = re.sub(r"^\s*//", "#", content, flags=re.MULTILINE)
+
+    return content
+
+
 def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
     """
     Patches the DEPS file to remove problematic dependencies for MinGW build.
-    Also calls to patch the 'build/dotfile_settings.gni', 'visual_studio_version.gni',
-    'setup_toolchain.py', 'build/config/win/BUILD.gn', AND 'build/toolchain/win/BUILD.gn' files.
+    Also calls to patch all relevant .gni and .gn files.
     """
     deps_path = os.path.join(v8_source_dir, "DEPS")
     if not os.path.exists(deps_path):
@@ -1145,17 +1214,17 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Combined check for critical strings (pipes, VS exception) and v7.17 shim content
+                # Combined check for critical strings (pipes, VS exception) and v7.18 shim content
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               f"# --- CerebrumLux injected shim START (v7.17) ---" not in content_before_patch or
+                               f"# --- CerebrumLux injected shim START (v7.18) ---" not in content_before_patch or
                                any(s in content_before_patch for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]))
 
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.17) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.18) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.17 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.18 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -1228,7 +1297,7 @@ def ensure_depot_tools(env):
 def write_args_gn(out_dir):
     """Writes the args.gn file for the GN build configuration."""
     os.makedirs(out_dir, exist_ok=True)
-    mingw_for = MINGW_BIN.replace("\\", "/")
+    mingw_for = Path(MINGW_BIN).as_posix() # Use Path.as_posix() directly for consistency
     args_content = (
         "is_debug = false\n"
         "target_os = \"win\"\n"
@@ -1249,8 +1318,8 @@ def write_args_gn(out_dir):
         "v8_target_cpu = \"x64\"\n"
         "v8_target_os = \"win\"\n"
     )
-    p = os.path.join(out_dir, "args.gn")
-    with open(p, "w", encoding="utf-8") as f:
+    p = Path(out_dir) / "args.gn" # Use Path for robust path handling
+    with p.open("w", encoding="utf-8") as f:
         f.write(args_content)
     log("INFO", f"args.gn written to {p}")
 
@@ -1299,22 +1368,10 @@ def run_gn_gen(env):
                 fake_vs_base_path_for_gn_obj = Path(V8_ROOT) / "FakeVS_Toolchain"
                 fake_vs_base_path_for_gn_posix = fake_vs_base_path_for_gn_obj.as_posix()
                 
-                # Ensure the dummy directories exist on disk for GN to reference
-                os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "bin", exist_ok=True)
-                os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "lib", exist_ok=True)
-                os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "include", exist_ok=True)
-                os.makedirs(fake_vs_base_path_for_gn_obj / "SDK", exist_ok=True)
-                os.makedirs(fake_vs_base_path_for_gn_obj / "SDK" / "lib", exist_ok=True)
-                os.makedirs(fake_vs_base_path_for_gn_obj / "SDK" / "include", exist_ok=True)
-                os.makedirs(fake_vs_base_path_for_gn_obj / "redist", exist_ok=True)
-                # Specific sub-directories for vcvars_toolchain_data paths
-                os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "atlmfc" / "lib", exist_ok=True)
-                os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib", exist_ok=True)
-                os.makedirs(fake_vs_base_path_for_gn_obj / "VC" / "ucrt" / "lib", exist_ok=True)
-                log("DEBUG", f"Ensured dummy GN reference directories exist under {fake_vs_base_path_for_gn_posix}.", to_console=False)
+                # These dummy directories are now created by _create_fake_vs_toolchain_dirs in main()
+                # Redundant os.makedirs calls here are removed.
 
                 # Check for individual top-level args (safeguard)
-                # These are generic compiler/SDK paths, might be useful for other parts of GN
                 if 'vc_bin_dir =' not in current_args_content: new_args_to_add.append(f'vc_bin_dir = "{fake_vs_base_path_for_gn_posix}/VC/bin"')
                 if 'vc_lib_path =' not in current_args_content: new_args_to_add.append(f'vc_lib_path = "{fake_vs_base_path_for_gn_posix}/VC/lib"')
                 if 'vc_include_path =' not in current_args_content: new_args_to_add.append(f'vc_include_path = "{fake_vs_base_path_for_gn_posix}/VC/include"')
@@ -1352,7 +1409,7 @@ def run_gn_gen(env):
 
 
                 if new_args_to_add:
-                    with open(args_gn_path, "a", encoding="utf-8") as f:
+                    with args_gn_path.open("a", encoding="utf-8") as f: # Use Path.open()
                         for arg_line in new_args_to_add:
                             f.write(arg_line + "\n")
                     log("INFO", f"Appended necessary configuration to {args_gn_path.name}.", to_console=True)
@@ -1390,18 +1447,18 @@ def run_ninja_build(env):
 
 def copy_to_vcpkg():
     """Copies compiled V8 artifacts (lib and headers) to vcpkg's installed directory."""
-    target_lib_dir = os.path.join(VCPKG_ROOT, "installed", "x64-mingw-static", "lib")
-    target_include_dir = os.path.join(VCPKG_ROOT, "installed", "x64-mingw-static", "include")
+    target_lib_dir = Path(VCPKG_ROOT) / "installed" / "x64-mingw-static" / "lib" # Use Path
+    target_include_dir = Path(VCPKG_ROOT) / "installed" / "x64-mingw-static" / "include" # Use Path
     os.makedirs(target_lib_dir, exist_ok=True)
     os.makedirs(target_include_dir, exist_ok=True)
     
-    lib_candidate = os.path.join(OUT_DIR, "obj", "libv8_monolith.a")
-    if not os.path.exists(lib_candidate):
+    lib_candidate = Path(OUT_DIR) / "obj" / "libv8_monolith.a" # Use Path
+    if not lib_candidate.exists():
         found = []
         for root, _, files in os.walk(OUT_DIR):
             for fn in files:
                 if fn.lower().startswith("libv8_monolith") and fn.endswith(".a"):
-                    found.append(os.path.join(root, fn))
+                    found.append(Path(root) / fn) # Use Path
         if found:
             lib_candidate = found[0]
             log("INFO", f"Found libv8_monolith.a at: {lib_candidate}")
@@ -1410,10 +1467,10 @@ def copy_to_vcpkg():
             raise FileNotFoundError(f"Built libv8_monolith.a not found under {OUT_DIR}")
             
     shutil.copy2(lib_candidate, target_lib_dir)
-    log("INFO", f"Copied '{os.path.basename(lib_candidate)}' to '{target_lib_dir}'")
+    log("INFO", f"Copied '{lib_candidate.name}' to '{target_lib_dir}'")
 
-    src_include = os.path.join(V8_SRC, "include")
-    if not os.path.isdir(src_include):
+    src_include = Path(V8_SRC) / "include" # Use Path
+    if not src_include.is_dir():
         log("ERROR", f"Headers not found in source include path: {src_include}")
         raise FileNotFoundError(src_include)
     
@@ -1423,13 +1480,13 @@ def copy_to_vcpkg():
 
 def update_vcpkg_port(version, ref, homepage, license):
     """Updates or creates the vcpkg portfile and manifest for V8."""
-    port_v8_dir = os.path.join(VCPKG_ROOT, "ports", "v8")
+    port_v8_dir = Path(VCPKG_ROOT) / "ports" / "v8" # Use Path
     os.makedirs(port_v8_dir, exist_ok=True)
-    portfile_path = os.path.join(port_v8_dir, "portfile.cmake")
-    manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
+    portfile_path = port_v8_dir / "portfile.cmake" # Use Path
+    manifest_path = port_v8_dir / "vcpkg.json" # Use Path
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.18
+# Auto-generated by CerebrumLux V8 Builder v7.19
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1453,17 +1510,17 @@ vcpkg_install_cmake(
 )
 
 # Copy prebuilt static lib from custom builder (CerebrumLux)
-file(COPY "{os.path.join(VCPKG_ROOT, 'installed', 'x64-mingw-static', 'lib', 'libv8_monolith.a').replace('\\', '/')}" DESTINATION ${{CURRENT_PACKAGES_DIR}}/lib)
+file(COPY "{(Path(VCPKG_ROOT) / 'installed' / 'x64-mingw-static' / 'lib' / 'libv8_monolith.a').as_posix()}" DESTINATION ${{CURRENT_PACKAGES_DIR}}/lib)
 
 # Copy headers - already handled by direct copy_to_vcpkg.
 # Use a more explicit path for V8_ROOT to avoid issues with CMake variable scope.
-file(GLOB_RECURSE V8_HEADERS_TO_COPY "{V8_ROOT.replace('\\', '/')}/v8/include/*.h" "{V8_ROOT.replace('\\', '/')}/v8/include/*.hpp")
+file(GLOB_RECURSE V8_HEADERS_TO_COPY "{(Path(V8_ROOT) / 'v8' / 'include').as_posix()}/*.h" "{(Path(V8_ROOT) / 'v8' / 'include').as_posix()}/*.hpp")
 file(COPY ${{V8_HEADERS_TO_COPY}} DESTINATION ${{CURRENT_PACKAGES_DIR}}/include/v8)
 
 # Handle copyright
 file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/share/${{PORT}}" RENAME copyright)
 """
-    with open(portfile_path, "w", encoding="utf-8") as f:
+    with portfile_path.open("w", encoding="utf-8") as f: # Use Path.open()
         f.write(cmake_content)
     log("INFO", f"Updated {portfile_path}")
 
@@ -1475,25 +1532,25 @@ file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/s
         "license": "BSD-3-Clause",
         "supports": "windows & !uwp"
     }
-    with open(manifest_path, "w", encoding="utf-8") as f:
+    with manifest_path.open("w", encoding="utf-8") as f: # Use Path.open()
         json.dump(manifest, f, indent=2)
     log("INFO", f"Created/updated {manifest_path}")
 
 def vcpkg_integrate_install(env):
     """Runs 'vcpkg integrate install' for system-wide CMake integration."""
-    vcpkg_exe = os.path.join(VCPKG_ROOT, "vcpkg.exe")
-    if not os.path.exists(vcpkg_exe):
+    vcpkg_exe = Path(VCPKG_ROOT) / "vcpkg.exe" # Use Path
+    if not vcpkg_exe.exists():
         log("WARN", f"vcpkg.exe not found at {vcpkg_exe}, skipping 'vcpkg integrate install'.")
         return
     log("STEP", "Running 'vcpkg integrate install'...")
-    run([vcpkg_exe, "integrate", "install"], env=env, capture_output=True)
+    run([str(vcpkg_exe), "integrate", "install"], env=env, capture_output=True) # Convert Path to string for subprocess
     log("INFO", "'vcpkg integrate install' completed.")
 
 # ----------------------------
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v7.18 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.19 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
@@ -1503,6 +1560,9 @@ def main():
         else:
             log("INFO", f"Creating V8_ROOT for fresh start: {V8_ROOT}", to_console=True)
         os.makedirs(V8_ROOT, exist_ok=True)
+
+        # Create dummy VS toolchain directories early
+        _create_fake_vs_toolchain_dirs(V8_ROOT)
 
         log("STEP", "Ensuring depot_tools is cloned and functional.")
         ensure_depot_tools(env)
@@ -1589,7 +1649,7 @@ def main():
         end_time = time.time()
         duration = end_time - start_time
         log("INFO", f"Script finished. Total time: {duration:.2f} seconds. Check full log file for details: {LOG_FILE}", to_console=True)
-        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+        with Path(LOG_FILE).open('r', encoding='utf-8') as f: # Use Path.open()
             log_content = f.read()
             if "FATAL" in log_content or "ERROR" in log_content:
                 log("SUMMARY_ERROR", f"Errors or Fatal issues detected in logs. Please check CerebrumLux-V8-Build-{V8_VERSION}.log and CerebrumLux-V8-Build-{V8_VERSION}-error.log", to_console=True)
@@ -1598,13 +1658,13 @@ def main():
 
 if __name__ == "__main__":
     os.makedirs(LOG_DIR, exist_ok=True)
-    if os.path.exists(LOG_FILE):
+    if Path(LOG_FILE).exists(): # Use Path.exists()
         try:
             timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
             shutil.move(LOG_FILE, f"{LOG_FILE}.old-{timestamp_str}")
         except Exception as e:
             print(f"WARN: Could not move old log file: {e}")
-    if os.path.exists(ERR_FILE):
+    if Path(ERR_FILE).exists(): # Use Path.exists()
         try:
             timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
             shutil.move(ERR_FILE, f"{ERR_FILE}.old-{timestamp_str}")
