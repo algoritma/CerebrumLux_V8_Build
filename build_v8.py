@@ -810,130 +810,88 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
 def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
     """
     Patches V8_SRC/build/toolchain/win/BUILD.gn to neutralize the 'exec_script' call
-    that populates win_toolchain_data, and injects a direct definition of win_toolchain_data
-    with hardcoded dummy paths. It also handles tool definitions and problematic flags.
+    that populates win_toolchain_data, and ensures tool definitions and problematic flags
+    are set for MinGW. The win_toolchain_data object itself will be injected via args.gn.
     """
     toolchain_build_gn_path = Path(v8_source_dir) / "build" / "toolchain" / "win" / "BUILD.gn"
     if not toolchain_build_gn_path.exists():
         log("WARN", f"'{toolchain_build_gn_path.name}' not found at {toolchain_build_gn_path}. Skipping patch.", to_console=True)
         return False
 
-    log("INFO", f"Patching '{toolchain_build_gn_path.name}' to neutralize 'exec_script', inject direct win_toolchain_data definition, and handle tool definitions and flags.", to_console=True)
+    log("INFO", f"Patching '{toolchain_build_gn_path.name}' to neutralize 'exec_script', and handle tool definitions and flags. win_toolchain_data will be provided via args.gn.", to_console=True)
     try:
         content = toolchain_build_gn_path.read_text(encoding="utf-8")
         patched_content = content
         modified = False
 
-        # Define dummy paths using the same base as in _create_fake_vs_toolchain_dirs
+        # Define dummy paths for generic replacements, and for eventual args.gn injection
         fake_vs_base_path_obj = Path(V8_ROOT) / "FakeVS_Toolchain"
 
-        # Map of win_toolchain_data fields to their hardcoded dummy paths (as_posix() for forward slashes)
         dummy_win_toolchain_paths = {
             "vc_bin_dir": (fake_vs_base_path_obj / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix(),
             "vc_lib_path": (fake_vs_base_path_obj / "VC" / "lib").as_posix(),
             "vc_include_path": (fake_vs_base_path_obj / "VC" / "include").as_posix(),
-            "sdk_dir": (fake_vs_base_path_obj / "SDK").as_posix(), # Ensure base SDK is also a Path
+            "sdk_dir": (fake_vs_base_path_obj / "SDK").as_posix(),
             "sdk_lib_path": (fake_vs_base_path_obj / "SDK" / "lib").as_posix(),
             "sdk_include_path": (fake_vs_base_path_obj / "SDK" / "include").as_posix(),
             "runtime_dirs": (fake_vs_base_path_obj / "redist").as_posix(),
-            "include_flags_imsvc": "", # Added for the specific error "No value named include_flags_imsvc"
+            "include_flags_imsvc": "", 
         }
         
         # --- 1. Neutralize the exec_script call for win_toolchain_data ---
-        # FIX (v7.21): Ensure the regex matches the full exec_script call and replaces it cleanly.
         exec_script_win_toolchain_pattern = re.compile(
             r"^(?P<indent>\s*)win_toolchain_data\s*=\s*exec_script\(\"setup_toolchain\.py\"[\s\S]*?\)\s*\n",
             re.MULTILINE | re.DOTALL
         )
 
         if exec_script_win_toolchain_pattern.search(patched_content):
-            # Replace the entire matched block with just a comment, ensuring no syntax issues.
             patched_content = exec_script_win_toolchain_pattern.sub(r"\g<indent># CerebrumLux neutralized win_toolchain_data exec_script call.", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'win_toolchain_data' in '{toolchain_build_gn_path.name}'.", to_console=False)
         else:
             log("INFO", f"No 'exec_script' call for 'win_toolchain_data' found in '{toolchain_build_gn_path.name}' or already neutralized. Skipping.", to_console=False)
 
-        # --- 2. Inject a direct definition for win_toolchain_data after neutralizing exec_script ---
-        # Find the insertion point (right after the neutralized exec_script line, or at the top if not found)
+        # --- 2. Remove any old injected direct 'win_toolchain_data' definition (CRITICAL for this fix) ---
+        # Bu kısım, önceki versiyonlarda doğrudan BUILD.gn içine yapılmış hatalı enjeksiyonları temizler.
         win_toolchain_data_block_marker = "# CerebrumLux Injected win_toolchain_data Block"
-        
-        # Check if the block is already present and correct, if so, no need to reinject.
-        block_already_present_and_correct = (win_toolchain_data_block_marker in patched_content and
-                                             f'  vc_bin_dir = "{dummy_win_toolchain_paths["vc_bin_dir"]}"' in patched_content and
-                                             f'  include_flags_imsvc = "{dummy_win_toolchain_paths["include_flags_imsvc"]}"' in patched_content)
-
-        if not block_already_present_and_correct:
-            # If an old injected block is present but not matching current definition, remove it.
-            old_injected_block_pattern = re.compile(
-                r"^(?P<indent>\s*)# CerebrumLux Injected win_toolchain_data Block[\s\S]*?(?P=indent)\}\s*\n",
-                re.MULTILINE | re.DOTALL
-            )
-            if old_injected_block_pattern.search(patched_content):
-                patched_content = old_injected_block_pattern.sub("", patched_content)
-                modified = True
-                log("INFO", f"Removed old injected 'win_toolchain_data' definition from '{toolchain_build_gn_path.name}' for re-injection.", to_console=False)
-
-            match_neutralized_line = re.search(r"^(?P<indent>\s*)# CerebrumLux neutralized win_toolchain_data exec_script call.", patched_content, re.MULTILINE)
-            
-            insert_point = 0
-            indent_level = "  " # Default indentation if no match (e.g., at top of file)
-            if match_neutralized_line:
-                insert_point = match_neutralized_line.end()
-                indent_level = match_neutralized_line.group('indent') # Use the same indentation as the neutralized line
-            
-            # Build the direct GN scope definition for win_toolchain_data
-            direct_win_toolchain_scope = (
-                f'\n{indent_level}{win_toolchain_data_block_marker}\n'
-                f'{indent_level}win_toolchain_data = {{\n'
-            )
-            for field, dummy_path in dummy_win_toolchain_paths.items():
-                direct_win_toolchain_scope += f'{indent_level}  {field} = "{dummy_path}"\n'
-            direct_win_toolchain_scope += f'{indent_level}}}\n'
-            
-            patched_content = patched_content[:insert_point] + direct_win_toolchain_scope + patched_content[insert_point:]
+        old_injected_block_pattern = re.compile(
+            r"^(?P<indent>\s*)# CerebrumLux Injected win_toolchain_data Block[\s\S]*?(?P=indent)\}\s*\n",
+            re.MULTILINE | re.DOTALL
+        )
+        if old_injected_block_pattern.search(patched_content):
+            patched_content = old_injected_block_pattern.sub("", patched_content)
             modified = True
-            log("INFO", f"Injected direct 'win_toolchain_data' definition into '{toolchain_build_gn_path.name}'.", to_console=False)
-        else:
-            log("INFO", f"Direct 'win_toolchain_data' definition appears to be already present and correctly defined in '{toolchain_build_gn_path.name}'. Skipping injection.", to_console=False)
-        
+            log("INFO", f"Removed old injected 'win_toolchain_data' definition from '{toolchain_build_gn_path.name}'.", to_console=False)
 
         # --- 3. Replace sys_include_flags and sys_lib_flags assignments with empty lists ---
-        # FIX (v7.23): Make regex more general to catch any assignment, and assign an empty list.
         sys_include_flags_pattern = re.compile(
-            r"^(?P<indent>\s*)sys_include_flags\s*=.*", # Match the whole line after indent and assignment
+            r"^(?P<indent>\s*)sys_include_flags\s*=.*",
             re.MULTILINE
         )
         initial_sys_include_content = patched_content
-        # Replace the entire line with the new assignment.
         patched_content = sys_include_flags_pattern.sub(r'\g<indent>sys_include_flags = [] # CerebrumLux MinGW patch', patched_content)
         if initial_sys_include_content != patched_content:
             modified = True
             log("INFO", f"Replaced 'sys_include_flags' assignment with empty list in '{toolchain_build_gn_path.name}'.", to_console=False)
 
         sys_lib_flags_pattern = re.compile(
-            r"^(?P<indent>\s*)sys_lib_flags\s*=.*", # Match the whole line after indent and assignment
+            r"^(?P<indent>\s*)sys_lib_flags\s*=.*",
             re.MULTILINE
         )
         initial_sys_lib_content = patched_content
-        # Replace the entire line with the new assignment.
         patched_content = sys_lib_flags_pattern.sub(r'\g<indent>sys_lib_flags = [] # CerebrumLux MinGW patch', patched_content)
         if initial_sys_lib_content != patched_content:
             modified = True
             log("INFO", f"Replaced 'sys_lib_flags' assignment with empty list in '{toolchain_build_gn_path.name}'.", to_console=False)
 
-
         # --- 4. Replace MSVC tool definitions with MinGW tools (as direct strings) ---
-        # This is a fallback and generally less desirable if win_toolchain_data is working.
-        # But if GN uses interpolation, it needs the values from win_toolchain_data.
-        # This part should be safe as it replaces the *entire line* with a literal string.
         mingw_bin_posix = Path(MINGW_BIN).as_posix()
         
         tool_definitions_to_patch = {
             r'^\s*cl\s*=\s*".*?"': f'cl = "{mingw_bin_posix}/gcc.exe"',
-            r'^\s*link\s*=\s*".*?"': f'link = "{mingw_bin_posix}/g++.exe"', # Linker is g++ for MinGW
-            r'^\s*lib\s*=\s*".*?"': f'lib = "{mingw_bin_posix}/ar.exe"', # Archiver is ar for MinGW
-            r'^\s*rc\s*=\s*".*?"': f'rc = "{mingw_bin_posix}/windres.exe"', # Standard MinGW resource compiler
+            r'^\s*link\s*=\s*".*?"': f'link = "{mingw_bin_posix}/g++.exe"',
+            r'^\s*lib\s*=\s*".*?"': f'lib = "{mingw_bin_posix}/ar.exe"',
+            r'^\s*rc\s*=\s*".*?"': f'rc = "{mingw_bin_posix}/windres.exe"', 
         }
         
         for pattern_str, replacement_str in tool_definitions_to_patch.items():
@@ -944,8 +902,8 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
                 modified = True
                 log("INFO", f"Replaced tool assignment (pattern: {pattern_str[:min(len(pattern_str), 50)]}...) with MinGW path in '{toolchain_build_gn_path.name}'.", to_console=False)
         
-        # Finally, a last resort generic replacement for any unhandled win_toolchain_data.<field> access.
-        # This should theoretically not be hit if the injected scope and specific assignments cover everything.
+        # --- 5. Generic replacement for any unhandled win_toolchain_data.<field> access ---
+        # Bu, win_toolchain_data nesnesi args.gn'den gelene kadar doğrudan erişimleri geçici olarak hardcoded yollarla değiştirir.
         for field, dummy_path in dummy_win_toolchain_paths.items():
             generic_access_pattern = re.compile(r"win_toolchain_data\." + re.escape(field), re.MULTILINE)
             initial_generic_replace_text = patched_content
@@ -954,9 +912,8 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
                 modified = True
                 log("INFO", f"Replaced generic access to 'win_toolchain_data.{field}' with hardcoded dummy path in '{toolchain_build_gn_path.name}' (final fallback).", to_console=False)
 
-
         if modified:
-            patched_content = _filter_gn_comments(patched_content) # Apply general comment filter before writing back
+            patched_content = _filter_gn_comments(patched_content)
             try:
                 bak_path = toolchain_build_gn_path.with_suffix(toolchain_build_gn_path.suffix + ".cerebrumlux.bak")
                 if not bak_path.exists():
@@ -979,7 +936,6 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
     except Exception as e:
         log("ERROR", f"Failed to patch '{toolchain_build_gn_path.name}': {e}", to_console=True)
         return False
-
 
 def _create_fake_vs_toolchain_dirs(v8_root_dir: str):
     """
@@ -1271,7 +1227,7 @@ def write_args_gn(out_dir):
 
 def run_gn_gen(env):
     """Generates Ninja build files using GN."""
-    gn_bin = _find_tool(["gn", "gn.exe"]) # Use _find_tool
+    gn_bin = _find_tool(["gn", "gn.exe"])
     if not gn_bin:
         raise RuntimeError("gn binary not found in PATH nor in depot_tools.")
     
@@ -1281,18 +1237,35 @@ def run_gn_gen(env):
     for attempt in range(1, max_attempts + 1):
         log("INFO", f"GN gen attempt {attempt}/{max_attempts}.", to_console=True)
         try:
-            # Capture output even on error to analyze it
             cp = run(gn_command, cwd=V8_SRC, env=env, check=False, capture_output=True)
             
             if cp.returncode == 0:
                 log("INFO", f"GN generated build files in {OUT_DIR}.")
                 return # Success!
             
-            # If GN failed, analyze its output
-            error_output = (cp.stdout or "") + (cp.stderr or "") # Ensure output is string even if empty
+            error_output = (cp.stdout or "") + (cp.stderr or "")
             log("ERROR", f"GN gen failed on attempt {attempt}: \n{error_output}", to_console=False)
 
-            # Check for specific errors that indicate missing vcvars_toolchain_data variables or GN syntax error
+            # Check for specific errors that indicate missing vcvars_toolchain_data or win_toolchain_data variables or GN syntax error
+            
+            # --- START: New checks for win_toolchain_data errors ---
+            needs_win_toolchain_data_patch = False
+            win_toolchain_data_error_patterns = [
+                "No value named \"vc_bin_dir\" in scope \"win_toolchain_data\"",
+                "No value named \"vc_lib_path\" in scope \"win_toolchain_data\"",
+                "No value named \"vc_include_path\" in scope \"win_toolchain_data\"",
+                "No value named \"sdk_dir\" in scope \"win_toolchain_data\"",
+                "No value named \"sdk_lib_path\" in scope \"win_toolchain_data\"",
+                "No value named \"sdk_include_path\" in scope \"win_toolchain_data\"",
+                "No value named \"runtime_dirs\" in scope \"win_toolchain_data\"",
+                "No value named \"include_flags_imsvc\"" # For win_toolchain_data too
+            ]
+            for pattern in win_toolchain_data_error_patterns:
+                if pattern in error_output:
+                    needs_win_toolchain_data_patch = True
+                    break
+            # --- END: New checks for win_toolchain_data errors ---
+
             if ("No value named \"vc_lib_path\" in scope \"vcvars_toolchain_data\"" in error_output or
                 "No value named \"vc_bin_dir\" in scope \"vcvars_toolchain_data\"" in error_output or
                 "No value named \"vc_include_path\" in scope \"vcvars_toolchain_data\"" in error_output or
@@ -1300,23 +1273,23 @@ def run_gn_gen(env):
                 "No value named \"sdk_lib_path\" in scope \"vcvars_toolchain_data\"" in error_output or
                 "No value named \"sdk_include_path\" in scope \"vcvars_toolchain_data\"" in error_output or
                 "No value named \"runtime_dirs\" in scope \"vcvars_toolchain_data\"" in error_output or
-                "No value named \"include_flags_imsvc\"" in error_output or # Added for new error
+                "No value named \"include_flags_imsvc\"" in error_output or
                 "May only use \".\" for identifiers." in error_output or
                 "Invalid token." in error_output or
                 "Bad thing passed to defined()." in error_output or
-                "Expecting assignment or function call." in error_output): # Added for the latest error
+                "Expecting assignment or function call." in error_output or # This is the current error pattern
+                needs_win_toolchain_data_patch): # Added: check if win_toolchain_data needs patching
                 
-                log("INFO", "Detected missing 'vcvars_toolchain_data' variables or GN syntax error in GN output. Attempting to patch args.gn.", to_console=True)
+                log("INFO", "Detected missing toolchain variables or GN syntax error in GN output. Attempting to patch args.gn.", to_console=True)
                 
                 args_gn_path = Path(OUT_DIR) / "args.gn"
                 current_args_content = args_gn_path.read_text(encoding="utf-8") if args_gn_path.exists() else ""
                 
                 new_args_to_add = []
-                # Use the same FakeVS_Toolchain paths as in _create_fake_vs_toolchain_dirs for consistency
                 fake_vs_base_path_for_gn_obj = Path(V8_ROOT) / "FakeVS_Toolchain"
                 fake_vs_base_path_for_gn_posix = fake_vs_base_path_for_gn_obj.as_posix()
                 
-                # Check for individual top-level args (safeguard)
+                # Check for individual top-level args (safeguard) - These are mostly for vcvars_toolchain_data's underlying elements
                 if 'vc_bin_dir =' not in current_args_content: new_args_to_add.append(f'vc_bin_dir = "{fake_vs_base_path_for_gn_posix}/VC/bin"')
                 if 'vc_lib_path =' not in current_args_content: new_args_to_add.append(f'vc_lib_path = "{fake_vs_base_path_for_gn_posix}/VC/lib"')
                 if 'vc_include_path =' not in current_args_content: new_args_to_add.append(f'vc_include_path = "{fake_vs_base_path_for_gn_posix}/VC/include"')
@@ -1343,44 +1316,57 @@ def run_gn_gen(env):
                     '}\n'
                 )
 
-                # Check if the vcvars_toolchain_data block is already in args.gn
-                if 'vcvars_toolchain_data = {' not in current_args_content:
+                if 'vcvars_toolchain_data = {' not in current_args_content or \
+                   f'vc_lib_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "lib").as_posix()}"' not in current_args_content:
                     new_args_to_add.append(vcvars_data_block)
                     log("INFO", f"Prepared to inject 'vcvars_toolchain_data' object into {args_gn_path.name}.", to_console=True)
                 else:
-                    # If the block is already there, check if its content matches our desired content
-                    if f'vc_lib_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "lib").as_posix()}"' not in current_args_content:
-                        log("WARN", "'vcvars_toolchain_data' object found, but its content might be outdated. Appending to ensure consistency.", to_console=True)
-                        new_args_to_add.append(vcvars_data_block) # Append even if exists, to ensure it's there
-                    else:
-                        log("INFO", "'vcvars_toolchain_data' object appears to be already present and correctly defined in args.gn. Skipping injection of block.", to_console=True)
+                    log("INFO", "'vcvars_toolchain_data' object appears to be already present and correctly defined in args.gn. Skipping injection of block.", to_console=True)
+
+                # --- START: New win_toolchain_data injection logic for args.gn ---
+                win_toolchain_data_block = (
+                    '\n# CerebrumLux Auto-patched win_toolchain_data for MinGW build\n'
+                    'win_toolchain_data = {\n'
+                    f'  vc_bin_dir = "{(fake_vs_base_path_for_gn_obj / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix()}"\n'
+                    f'  vc_lib_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "lib").as_posix()}"\n'
+                    f'  vc_include_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "include").as_posix()}"\n'
+                    f'  sdk_dir = "{(fake_vs_base_path_for_gn_obj / "SDK").as_posix()}"\n'
+                    f'  sdk_lib_path = "{(fake_vs_base_path_for_gn_obj / "SDK" / "lib").as_posix()}"\n'
+                    f'  sdk_include_path = "{(fake_vs_base_path_for_gn_obj / "SDK" / "include").as_posix()}"\n'
+                    f'  runtime_dirs = "{(fake_vs_base_path_for_gn_obj / "redist").as_posix()}"\n'
+                    f'  include_flags_imsvc = ""\n'
+                    '}\n'
+                )
+                if needs_win_toolchain_data_patch and ('win_toolchain_data = {' not in current_args_content or
+                                                      f'vc_bin_dir = "{(fake_vs_base_path_for_gn_obj / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix()}"' not in current_args_content):
+                    new_args_to_add.append(win_toolchain_data_block)
+                    log("INFO", f"Prepared to inject 'win_toolchain_data' object into {args_gn_path.name}.", to_console=True)
+                else:
+                    log("INFO", "'win_toolchain_data' object appears to be already present and correctly defined in args.gn or not needed. Skipping injection of block.", to_console=True)
+                # --- END: New win_toolchain_data injection logic for args.gn ---
 
 
                 if new_args_to_add:
-                    with args_gn_path.open("a", encoding="utf-8") as f: # Use Path.open()
+                    with args_gn_path.open("a", encoding="utf-8") as f:
                         for arg_line in new_args_to_add:
                             f.write(arg_line + "\n")
                     log("INFO", f"Appended necessary configuration to {args_gn_path.name}.", to_console=True)
-                    # The loop will naturally retry gn gen with the new args.gn
                 elif attempt < max_attempts:
                     log("WARN", "Required GN variables appear to be present in args.gn or could not be injected. This might indicate another GN configuration issue.", to_console=True)
-                    # No new args to add, so break from auto-patching and let the loop retry or fail.
                     break 
-                else: # Last attempt and no new args could be added
-                    raise RuntimeError("GN gen failed and auto-patching args.gn did not help or was not needed for vcvars_toolchain_data errors.")
+                else:
+                    raise RuntimeError("GN gen failed and auto-patching args.gn did not help or was not needed for toolchain_data errors.")
 
             else:
-                # If a different type of error, or if auto-patching didn't apply, raise it immediately
                 log("FATAL", f"GN gen failed with unhandled error or after auto-patching. Full output:\n{error_output}", to_console=True)
                 raise RuntimeError(f"GN gen command failed with code {cp.returncode}.")
         
         except Exception as e:
-            # If the current attempt failed for an unexpected reason
             if attempt == max_attempts:
                 raise RuntimeError(f"GN gen failed after {max_attempts} attempts: {e}")
             else:
                 log("WARN", f"GN gen failed on attempt {attempt}, trying again: {e}", to_console=True)
-                time.sleep(2) # Small delay before retry
+                time.sleep(2)
 
     raise RuntimeError("GN gen failed after all attempts.")
 
@@ -1501,7 +1487,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.24 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.25 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
