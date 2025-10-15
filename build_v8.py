@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.37.5 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.37.6 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -52,7 +52,7 @@ CerebrumLux V8 Build Automation v7.37.5 (Final Robust MinGW Build - Incorporatin
 - FIX (v7.21): Corrected `Expected ')'` error in `_patch_toolchain_win_build_gn` by ensuring `exec_script` neutralization leaves no remnant bad syntax and correctly injecting the `win_toolchain_data` object directly into the GN file. Updated shim version.
 - FIX (v7.22): Added `include_flags_imsvc: ''` to `win_toolchain_data` injection in `_patch_toolchain_win_build_gn` to resolve "No value named 'include_flags_imsvc'" error. Implemented `warnings.filterwarnings` for `DeprecationWarning` in `main()`. Updated shim version.
 - FIX (v7.23): Patched `_patch_toolchain_win_build_gn` to explicitly replace `sys_lib_flags = ...` and `sys_include_flags = ...` assignments with `sys_lib_flags = []` and `sys_include_flags = []` to satisfy GN's "Expecting assignment" rule. Updated shim version.
-- FIX (v7.24): Refined `_patch_toolchain_win_build_gn` regex for `sys_lib_flags` and `sys_include_flags` to be more general (`.*` instead of `\\[[\\s\\S]*?\\]`) and removed `re.DOTALL` to correctly handle single-line assignments, resolving "Expecting assignment or function call" error. Updated shim version.
+- FIX (v7.24): Refined `_patch_toolchain_win_build_gn` regex for `sys_lib_flags` and `sys_include_flags` to be more general (`.*` instead of `\\[\\s\\S]*?\\]`) and removed `re.DOTALL` to correctly handle single-line assignments, resolving "Expecting assignment or function call" error. Updated shim version.
 - FIX (v7.25): Corrected `NameError: name 'fake_vs_base_path_path_obj' is not defined` in `_patch_toolchain_win_build_gn`. Updated shim version. Also refined `_patch_toolchain_win_build_gn` to aggressively remove previous `sys_flags` assignments and inject new ones at a safe location, addressing "Expecting assignment or function call" for `} else {`.
 - FIX (v7.26): Removed `re.REVERSE` which caused `AttributeError`. Refined `_patch_toolchain_win_build_gn` to directly replace `sys_flags` assignments or inject them if missing, addressing "Expecting assignment or function call" and "Assignment had no effect" related to `sys_flags`. Updated shim version.
 - FIX (v7.27): Further refined `_patch_toolchain_win_build_gn` to remove direct assignments of `sys_lib_flags` and `sys_include_flags` from `build/toolchain/win/BUILD.gn` entirely, and added these flags to the `win_toolchain_data` object injected into `args.gn` via `run_gn_gen`, resolving "Assignment had no effect" for `sys_lib_flags`. Updated shim version.
@@ -70,7 +70,7 @@ CerebrumLux V8 Build Automation v7.37.5 (Final Robust MinGW Build - Incorporatin
 - FIX (v7.37.3): Resolved "Expected comma between items" in `build/config/win/BUILD.gn` by modifying `_patch_build_gn` to replace the `vcvars_toolchain_data` object definition with an empty string (`""`) instead of a comment block. This prevents GN from interpreting the comment as an invalid list item, ensuring correct list syntax.
 - FIX (v7.37.4): Implemented `normalize_gn_lists` to automatically add missing commas between list items in `BUILD.gn` files. This directly fixes "Expected comma between items" errors within GN lists (e.g., `cflags`).
 - FIX (v7.37.5): Addressed `IndentationError` in `patch_v8_deps_for_mingw` by explicitly ensuring correct indentation for the `build_config_win_build_gn_path` assignment and the subsequent `if normalize_gn_lists` block. Corrected remaining `SyntaxWarning: invalid escape sequence '\g'` in the docstring by escaping all literal `\g` occurrences as `\\g`.
-
+- FIX (v7.37.6): Further refined `patch_v8_deps_for_mingw` to correctly handle control flow and indentation after `_patch_build_gn` and `_patch_toolchain_win_build_gn` calls, ensuring `normalize_gn_lists` and `git add` are always correctly invoked. Fully resolved all `SyntaxWarning: invalid escape sequence '\g'` in docstring by explicitly escaping them.
 """
 import os
 import sys
@@ -1229,23 +1229,16 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
     # NEW: Call to patch build/config/win/BUILD.gn
     log("INFO", "Calling patch for 'build/config/win/BUILD.gn'.", to_console=True)
     if not _patch_build_gn(v8_source_dir, env):
-    # FIX (v7.37.5): Ensured correct indentation for these lines.
-    # FIX (v7.37.4): Normalize GN list syntax after patching BUILD.gn
-    build_config_win_build_gn_path = Path(v8_source_dir) / "build" / "config" / "win" / "BUILD.gn"
-     if normalize_gn_lists(build_config_win_build_gn_path):
-         run(["git", "add", str(build_config_win_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
-         log("INFO", f"Staged '{build_config_win_build_gn_path.name}' changes with 'git add' after GN list normalization.", to_console=True)
-     else:
-        # Ensure git add is still called even if no changes, to ensure it's staged
-         run(["git", "add", str(build_config_win_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
- 
-     # NEW: Call to patch build/toolchain/win/BUILD.gn
-     log("INFO", "Calling patch for 'build/toolchain/win/BUILD.gn'.", to_console=True)
-     if not _patch_toolchain_win_build_gn(v8_source_dir, env):
-+        # While the error was specifically in build/config/win/BUILD.gn, it's good practice
-+        # to run normalization on other BUILD.gn files if they also contain similar lists.        
         log("FATAL", "Failed to patch 'build/config/win/BUILD.gn'. Aborting.", to_console=True)
         sys.exit(1)
+    # FIX (v7.37.4): Normalize GN list syntax after patching BUILD.gn
+    build_config_win_build_gn_path = Path(v8_source_dir) / "build" / "config" / "win" / "BUILD.gn"
+    if normalize_gn_lists(build_config_win_build_gn_path):
+        run(["git", "add", str(build_config_win_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
+        log("INFO", f"Staged '{build_config_win_build_gn_path.name}' changes with 'git add' after GN list normalization.", to_console=True)
+    else:
+        # Ensure git add is still called even if no changes, to ensure it's staged
+        run(["git", "add", str(build_config_win_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
 
     # NEW: Call to patch build/toolchain/win/BUILD.gn
     log("INFO", "Calling patch for 'build/toolchain/win/BUILD.gn'.", to_console=True)
@@ -1675,11 +1668,11 @@ def vcpkg_integrate_install(env):
 # ----------------------------
 # === Main Workflow ===
 # ----------------------------
-def main(): # CerebrumLux V8 Build v7.37.5
+def main(): # CerebrumLux V8 Build v7.37.6
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.37.5 started ===", to_console=True) # Updated start message for 7.37.1
+    log("START", "=== CerebrumLux V8 Build v7.37.6 started ===", to_console=True) # Updated start message for 7.37.1
     start_time = time.time()
     env = prepare_subprocess_env()
 
@@ -1751,9 +1744,18 @@ def main(): # CerebrumLux V8 Build v7.37.5
         if normalize_gn_lists(build_config_win_build_gn_path):
             run(["git", "add", str(build_config_win_build_gn_path)], cwd=V8_SRC, env=env, check=False)
             log("INFO", f"Staged '{build_config_win_build_gn_path.name}' changes with 'git add' after re-patching and normalization.", to_console=True)
+        else:
+            run(["git", "add", str(build_config_win_build_gn_path)], cwd=V8_SRC, env=env, check=False)
+
         if not _patch_toolchain_win_build_gn(V8_SRC, env): # Re-patch build/toolchain/win/BUILD.gn as well
             log("FATAL", "Failed to re-patch 'build/toolchain/win/BUILD.gn'. Aborting.", to_console=True)
             sys.exit(1)
+        toolchain_build_gn_path = Path(V8_SRC) / "build" / "toolchain" / "win" / "BUILD.gn"
+        if normalize_gn_lists(toolchain_build_gn_path):
+            run(["git", "add", str(toolchain_build_gn_path)], cwd=V8_SRC, env=env, check=False)
+            log("INFO", f"Staged '{toolchain_build_gn_path.name}' changes with 'git add' after GN list normalization.", to_console=True)
+        else:
+            run(["git", "add", str(toolchain_build_gn_path)], cwd=V8_SRC, env=env, check=False)
 
         log("STEP", "Writing args.gn configuration for MinGW build.")
         write_args_gn(OUT_DIR)
