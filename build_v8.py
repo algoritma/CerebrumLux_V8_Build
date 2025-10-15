@@ -1,4 +1,3 @@
-python
 #!/usr/bin/env python3
 """
 CerebrumLux V8 Build Automation v7.19 (Final Robust MinGW Build - Incorporating all feedback)
