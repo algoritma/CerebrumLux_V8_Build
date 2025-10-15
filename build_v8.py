@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.36 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.36.3 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -64,7 +64,7 @@ CerebrumLux V8 Build Automation v7.36 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.33): Resolved `bad escape \g at position 55` error in `_patch_build_gn` by correcting an incorrect lambda replacement expression. Ensured all `re.sub` replacements use correct `lambda m: "..."` or direct string literals, avoiding problematic `\g` usage. Updated shim version.
 - FIX (v7.34): Further refined `_patch_build_gn` to handle `vcvars_toolchain_data` references more robustly, ensuring `re.sub` replacement strings are correctly formed literals. Specifically, adjusted the `access_pattern.sub` lambda to explicitly handle the `pre_assign` group and ensure the injected `dummy_path` is properly quoted, preventing `bad escape \g` errors. Also, corrected `vc_lib_um_path`'s `fake_vs_base_for_gn_obj` typo in `run_gn_gen`. Updated shim version.
 - FIX (v7.35): Addressed the persistent `bad escape \g` error by implementing explicit string concatenation (`+` operator) instead of f-strings within `re.sub` lambda replacements for `_patch_build_gn` to avoid any implicit backslash interpretation. Also, corrected the `SyntaxWarning` in the docstring by using a raw string literal. Updated shim version.
-- FIX (v7.36): Reviewed `_patch_build_gn` for a lingering `bad escape \g` by ensuring all dynamic string components in `re.sub` replacements are handled to prevent premature backslash interpretation. Explicitly escaped `dummy_path` using `.replace('\\', '\\\\')` where `m.group()` is used within the replacement string, guaranteeing literal backslashes are passed to `re.sub`.
+- FIX (v7.36): Reviewed `_patch_build_gn` for a lingering `bad escape \g` by ensuring all dynamic string components in `re.sub` replacements are handled to prevent premature backslash interpretation. Explicitly escaped `dummy_path` using `.replace('\\', '\\\\')` where `m.group()` is used within the replacement string, guaranteeing literal backslashes are passed to `re.sub`. Added `sanitize_path` helper for robust path handling in replacements.
 """
 import os
 import sys
@@ -761,7 +761,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         )
         if exec_script_vcvars_pattern.search(patched_content):
             # FIX (v7.35): Use direct string concatenation to prevent bad escape \g.
-            patched_content = exec_script_vcvars_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '\\\\') + "\n", patched_content)
+            patched_content = exec_script_vcvars_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '/') + "\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'vcvars_toolchain_data' in '{build_gn_path.name}'.", to_console=False)
         else:
@@ -1210,17 +1210,17 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Combined check for critical strings (pipes, VS exception) and v7.35 shim content
-                if f"# --- CerebrumLux injected shim START (v7.35) ---" not in content_before_patch:
+                # Combined check for critical strings (pipes, VS exception) and v7.36 shim content
+                if f"# --- CerebrumLux injected shim START (v7.36) ---" not in content_before_patch:
                     needs_patch = True
                 else:
                     needs_patch = False # Assume patched if latest shim marker is present
 
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.35) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.36) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.35 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.36 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -1519,7 +1519,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = port_v8_dir / "vcpkg.json"
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.35
+# Auto-generated by CerebrumLux V8 Builder v7.36
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1586,7 +1586,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.36.2 started ===", to_console=True) # Updated start message
+    log("START", "=== CerebrumLux V8 Build v7.36 started ===", to_console=True) # Updated start message
     start_time = time.time()
     env = prepare_subprocess_env()
 
