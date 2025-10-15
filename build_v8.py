@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.35 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.36 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -653,13 +653,11 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
         patched_content = content
         modified = False
 
-        # FIX (v7.30): Use named group for entire function body.
         pattern_load_toolchain_env = re.compile(
             r"^(?P<func_def>def\s+_LoadToolchainEnv\([^)]*\):)(?P<body>(?:\n\s+.*)*?)(?=\n^def|\Z)", # Matches the entire function body
             re.MULTILINE | re.DOTALL
         )
         if pattern_load_toolchain_env.search(patched_content):
-            # Define dummy paths relative to V8_ROOT to avoid hardcoding C:\FakeVS directly in the patch function body.
             fake_vs_root_for_py = Path(V8_ROOT) / "FakeVS_Toolchain"
             
             replacement_func_body = f"""def _LoadToolchainEnv(cpu, toolchain_root, win_sdk_path, target_store):
@@ -951,7 +949,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
             else:
                 log("INFO", "'sys_include_flags' and 'sys_lib_flags' already present before 'msvc_toolchain' template. Skipping injection.", to_console=False)
         else:
-            log("WARN", "Could not find 'template(\"msvc_toolchain\") {' pattern in 'BUILD.gn'. Cannot inject sys_flags before it. This might lead to 'Undefined identifier' errors.", to_console=True)
+            log("WARN", "Could not find 'template(\"msvc_toolchain\") {' pattern in 'BUILD.gn'. Cannot inject sys_flags before it.", to_console=True)
             # Fallback to appending at the end if msvc_toolchain template is not found (less ideal but prevents "Undefined identifier")
             if not re.search(r"sys_include_flags\s*=\s*\[\]\s*# CerebrumLux injected", patched_content) and \
                not re.search(r"sys_lib_flags\s*=\s*\[\]\s*# CerebrumLux injected", patched_content):
