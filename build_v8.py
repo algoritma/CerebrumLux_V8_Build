@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.32 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.33 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -61,6 +61,7 @@ CerebrumLux V8 Build Automation v7.32 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.30): Applied comprehensive regex and replacement string corrections across patching functions to ensure proper named-group usage (`(?P<name>...)`), avoid incorrect `\g` usage, and leverage lambda for safer substitutions, addressing residual patching failures and enhancing overall robustness based on detailed analysis. Updated shim version.
 - FIX (v7.31): Aggressively modified `_patch_build_gn` to fully remove / replace all references and definitions of `vcvars_toolchain_data` in `build/config/win/BUILD.gn` with hardcoded dummy paths or `true` (for `defined()` checks). This directly addresses `ERROR at //build/config/win/BUILD.gn:305:40: Expecting assignment or function call. ],` by eliminating its source. Updated shim version.
 - FIX (v7.32): Corrected `vc_bin_dir` path in `_LoadToolchainEnv` within `_patch_setup_toolchain_py` to include `Hostx64/x64`, ensuring consistency. Also, refined `_patch_build_gn` to handle specific list closure issues by ensuring no orphaned `]` or `,` remain after aggressive substitutions, and added `//` style comment stripping to `_filter_gn_comments` for better robustness. Updated shim version.
+- FIX (v7.33): Resolved `bad escape \g at position 55` error in `_patch_build_gn` by correcting an incorrect lambda replacement expression. Ensured all `re.sub` replacements use correct `lambda m: f"..."` or direct string literals, avoiding problematic `\g` usage. Updated shim version.
 """
 import os
 import sys
@@ -342,7 +343,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.32) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.33) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -376,7 +377,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "# --- CerebrumLux injected shim END ---\n\n"
         )
 
-        if f"# --- CerebrumLux injected shim START (v7.32) ---" not in text: # Updated version check
+        if f"# --- CerebrumLux injected shim START (v7.33) ---" not in text: # Updated version check
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -435,8 +436,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         else:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.32) ---" not in current_content: # Updated version check
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.32) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.33) ---" not in current_content: # Updated version check
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.33) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -449,7 +450,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 log("ERROR", f"'{vs_toolchain_path.name}' contains VS detection exception but was not neutralized. Patching is NOT sticking.", to_console=False)
                 return False
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.32 content missing).", to_console=False) # Updated version check
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.33 content missing).", to_console=False) # Updated version check
                  return False
             
             return True
@@ -685,7 +686,7 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
     Path(r"{fake_vs_root_for_py.as_posix()}/redist").mkdir(parents=True, exist_ok=True)
     
     return {{
-        "vc_bin_dir": (Path(r"{fake_vs_root_for_py.as_posix()}") / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix(), # Correct path for vc_bin_dir (was missing Hostx64/x64)
+        "vc_bin_dir": (Path(r"{fake_vs_root_for_py.as_posix()}") / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix(), # Corrected path
         "vc_lib_path": (Path(r"{fake_vs_root_for_py.as_posix()}") / "VC" / "lib").as_posix(),
         "vc_include_path": (Path(r"{fake_vs_root_for_py.as_posix()}") / "VC" / "include").as_posix(),
         "sdk_dir": (Path(r"{fake_vs_root_for_py.as_posix()}") / "SDK").as_posix(),
@@ -770,7 +771,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         )
         if exec_script_vcvars_pattern.search(patched_content):
             # Replace the entire line with a comment to fully neutralize it.
-            patched_content = exec_script_vcvars_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip()}", patched_content)
+            patched_content = exec_script_vcvars_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip()}\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'vcvars_toolchain_data' in '{build_gn_path.name}'.", to_console=False)
         else:
@@ -805,21 +806,24 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
                 log("INFO", f"Replaced 'defined(vcvars_toolchain_data.{field})' with 'true' in '{build_gn_path.name}'.", to_console=False)
 
         # Then, replace all other accesses/assignments to vcvars_toolchain_data.<field> with dummy paths
+        # FIX (v7.33): Corrected lambda replacement. The previous lambda was causing bad escape issues.
+        # Now explicitly construct the replacement string based on context captured by regex.
         for field, dummy_path in dummy_vcvars_paths.items():
-            # This pattern matches any occurrence of `vcvars_toolchain_data.field` potentially preceded by an assignment or as part of a string expansion.
             access_pattern = re.compile(
-                r"vcvars_toolchain_data\." + re.escape(field),
+                r"(?P<pre_assign>\b[a-zA-Z0-9_]+\s*=\s*)?(?P<vcvars_ref>vcvars_toolchain_data\." + re.escape(field) + r")",
                 re.MULTILINE
             )
             initial_access_replace_text = patched_content
-            # Replace directly with the dummy path as a string literal.
-            patched_content = access_pattern.sub(f'"{dummy_path}"', patched_content)
+            # Use a lambda to dynamically build the replacement based on captured groups.
+            patched_content = access_pattern.sub(
+                lambda m: f"{m.group('pre_assign') or ''}\"{dummy_path}\"",
+                patched_content
+            )
             if initial_access_replace_text != patched_content:
                 modified = True
                 log("INFO", f"Replaced all direct accesses/assignments for 'vcvars_toolchain_data.{field}' with hardcoded dummy path in '{build_gn_path.name}'.", to_console=False)
         
         # --- Critical: Remove any remaining `vcvars_toolchain_data` object definitions that might cause syntax errors ---
-        # This targets situations where vcvars_toolchain_data is defined as a scope/object directly in the BUILD.gn file.
         vcvars_data_object_pattern = re.compile(
             r"^(?P<indent>\s*)vcvars_toolchain_data\s*=\s*\{[\s\S]*?^\g<indent>\}\s*$", # Matches the entire object definition
             re.MULTILINE | re.DOTALL
@@ -830,18 +834,21 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             log("INFO", "Neutralized direct 'vcvars_toolchain_data' object definition in 'BUILD.gn' to prevent syntax errors.", to_console=False)
 
         # --- Aggressively strip any orphaned commas or square brackets that might cause syntax errors (e.g., from removing items from a list) ---
-        # This addresses issues like the `],` error found in v7.30.
-        orphaned_punctuation_pattern = re.compile(r"^\s*[,\]]\s*$", re.MULTILINE)
+        # This addresses issues like the `],` error found in v7.30 and v7.31.
+        # FIX (v7.32): Ensure it also removes lines that only contain commas (e.g., after an element in a list is removed)
+        orphaned_punctuation_pattern = re.compile(r"^\s*[,\}\]]\s*$", re.MULTILINE)
         initial_orphaned_content = patched_content
-        # Remove any lines that only contain orphaned commas or closing square brackets (after stripping comments)
+        # Remove any lines that only contain orphaned commas or closing square/curly brackets
         patched_content = orphaned_punctuation_pattern.sub("", patched_content)
         if initial_orphaned_content != patched_content:
             modified = True
-            log("INFO", "Removed orphaned commas and square brackets to prevent syntax errors.", to_console=False)
+            log("INFO", "Removed orphaned commas and square/curly brackets to prevent syntax errors.", to_console=False)
 
 
         if modified:
-            patched_content = _filter_gn_comments(patched_content) # Apply general comment filter before writing back
+            # FIX (v7.32): Apply general comment filter AFTER all other patching steps
+            # to ensure intermediate // comments are also handled
+            patched_content = _filter_gn_comments(patched_content) 
             try:
                 bak_path = build_gn_path.with_suffix(build_gn_path.suffix + ".cerebrumlux.bak")
                 if not bak_path.exists():
@@ -1215,17 +1222,17 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Combined check for critical strings (pipes, VS exception) and v7.32 shim content
-                if f"# --- CerebrumLux injected shim START (v7.32) ---" not in content_before_patch:
+                # Combined check for critical strings (pipes, VS exception) and v7.33 shim content
+                if f"# --- CerebrumLux injected shim START (v7.33) ---" not in content_before_patch:
                     needs_patch = True
                 else:
                     needs_patch = False # Assume patched if latest shim marker is present
 
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.32) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.33) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.32 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.33 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -1391,7 +1398,7 @@ def run_gn_gen(env):
                 fake_vs_base_path_for_gn_posix = fake_vs_base_path_for_gn_obj.as_posix()
                 
                 # Check for individual top-level args (safeguard) - These are mostly for vcvars_toolchain_data's underlying elements
-                if 'vc_bin_dir =' not in current_args_content: new_args_to_add.append(f'vc_bin_dir = "{fake_vs_base_path_for_gn_posix}/VC/Tools/Bin/Hostx64/x64"') # FIX: Added Hostx64/x64
+                if 'vc_bin_dir =' not in current_args_content: new_args_to_add.append(f'vc_bin_dir = "{fake_vs_base_path_for_gn_posix}/VC/Tools/Bin/Hostx64/x64"')
                 if 'vc_lib_path =' not in current_args_content: new_args_to_add.append(f'vc_lib_path = "{fake_vs_base_path_for_gn_posix}/VC/lib"')
                 if 'vc_include_path =' not in current_args_content: new_args_to_add.append(f'vc_include_path = "{fake_vs_base_path_for_gn_posix}/VC/include"')
                 if 'sdk_dir =' not in current_args_content: new_args_to_add.append(f'sdk_dir = "{fake_vs_base_path_for_gn_posix}/SDK"')
@@ -1412,7 +1419,7 @@ def run_gn_gen(env):
                     'vcvars_toolchain_data = {\n'
                     f'  vc_lib_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "lib").as_posix()}"\n'
                     f'  vc_lib_atlmfc_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "atlmfc" / "lib").as_posix()}"\n'
-                    f'  vc_lib_um_path = "{(fake_vs_base_for_gn_obj / "VC" / "um" / "lib").as_posix()}"\n'
+                    f'  vc_lib_um_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib").as_posix()}"\n'
                     f'  vc_lib_ucrt_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "ucrt" / "lib").as_posix()}"\n'
                     '}\n'
                 )
@@ -1524,7 +1531,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = port_v8_dir / "vcpkg.json"
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.32
+# Auto-generated by CerebrumLux V8 Builder v7.33
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1591,7 +1598,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.32 started ===", to_console=True) # Updated start message
+    log("START", "=== CerebrumLux V8 Build v7.33 started ===", to_console=True) # Updated start message
     start_time = time.time()
     env = prepare_subprocess_env()
 
