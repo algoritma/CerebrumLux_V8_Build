@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.37 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.37.1 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -64,7 +64,7 @@ CerebrumLux V8 Build Automation v7.37 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.33): Resolved `bad escape \g at position 55` error in `_patch_build_gn` by correcting an incorrect lambda replacement expression. Ensured all `re.sub` replacements use correct `lambda m: "..."` or direct string literals, avoiding problematic `\g` usage. Updated shim version.
 - FIX (v7.34): Further refined `_patch_build_gn` to handle `vcvars_toolchain_data` references more robustly, ensuring `re.sub` replacement strings are correctly formed literals. Specifically, adjusted the `access_pattern.sub` lambda to explicitly handle the `pre_assign` group and ensure the injected `dummy_path` is properly quoted, preventing `bad escape \g` errors. Also, corrected `vc_lib_um_path`'s `fake_vs_base_for_gn_obj` typo in `run_gn_gen`. Updated shim version.
 - FIX (v7.35): Addressed the persistent `bad escape \g` error by implementing explicit string concatenation (`+` operator) instead of f-strings within `re.sub` lambda replacements for `_patch_build_gn` to avoid any implicit backslash interpretation. Also, corrected the `SyntaxWarning` in the docstring by using a raw string literal. Updated shim version.
-- FIX (v7.36): Reviewed `_patch_build_gn` for a lingering `bad escape \g` by ensuring all dynamic string components in `re.sub` replacements are handled to prevent premature backslash interpretation. Explicitly escaped `dummy_path` using `.replace('\\', '\\\\')` where `m.group()` is used within the replacement string, guaranteeing literal backslashes are passed to `re.sub`. Added `_sanitize_replacement_string` helper for robust path handling in replacements.
+- FIX (v7.36): Reviewed `_patch_build_gn` for a lingering `bad escape \g` by ensuring all dynamic string components in `re.sub` replacements are handled to prevent premature backslash interpretation. Explicitly escaped `dummy_path` using `.replace('\\', '\\\\')` where `m.group()` is used within the replacement string, guaranteeing literal backslashes are passed to `re.sub`. Added `_sanitize_replacement_string` helper for robust path handling in replacements. Updated shim version.
 """
 import os
 import sys
@@ -542,7 +542,7 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
         )
         if exec_script_pattern.search(patched_content):
             # FIX (v7.36): Escape captured group for safety before using in replacement
-            patched_content = exec_script_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '\\\\') + "\n", patched_content)
+            patched_content = exec_script_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '/') + "\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script(\"../../vs_toolchain.py\"...)' call in '{vs_version_gni_path.name}'.", to_console=False)
 
@@ -762,7 +762,9 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         )
         if exec_script_vcvars_pattern.search(patched_content):
             # FIX (v7.36): Escape captured group for safety before using in replacement
-            patched_content = exec_script_vcvars_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '/') + "\n", patched_content)
+            replacement_str = r"\g<indent># CerebrumLux neutralized: " + re.escape(exec_script_vcvars_pattern.search(patched_content).group(0).strip().replace('\\', '/')) + r"\n"
+            log("DEBUG", f"Pattern: {exec_script_vcvars_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
+            patched_content = exec_script_vcvars_pattern.sub(replacement_str, patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'vcvars_toolchain_data' in '{build_gn_path.name}'.", to_console=False)
         else:
@@ -790,7 +792,10 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
                 re.MULTILINE
             )
             initial_defined_replace_text = patched_content
-            patched_content = defined_pattern.sub(r'true', patched_content)
+            # Replace defined() call with 'true'.
+            replacement_str = r'true'
+            log("DEBUG", f"Pattern: {defined_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
+            patched_content = defined_pattern.sub(replacement_str, patched_content)
             if initial_defined_replace_text != patched_content:
                 modified = True
                 log("INFO", f"Replaced 'defined(vcvars_toolchain_data.{field})' with 'true' in '{build_gn_path.name}'.", to_console=False)
@@ -807,10 +812,10 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             def create_replacement_string_for_vcvars(m, current_dummy_path=dummy_path):
                 pre_assign_part = m.group('pre_assign') or ''
                 # Sanitize current_dummy_path for safe use in regex replacement string.
-                # GN paths use forward slashes, so replace backslashes if any.
                 sanitized_dummy_path = current_dummy_path.replace('\\', '/')
                 return pre_assign_part + '"' + sanitized_dummy_path + '"'
 
+            log("DEBUG", f"Pattern: {access_pattern.pattern}, Replacement Logic: create_replacement_string_for_vcvars", to_console=False)
             patched_content = access_pattern.sub(create_replacement_string_for_vcvars, patched_content)
 
             if initial_access_replace_text != patched_content:
@@ -824,14 +829,18 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         )
         if vcvars_data_object_pattern.search(patched_content):
             # FIX (v7.36): Use direct string concatenation for clarity and safety.
-            patched_content = vcvars_data_object_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized vcvars_toolchain_data object definition\n", patched_content)
+            replacement_str = r"\g<indent># CerebrumLux neutralized vcvars_toolchain_data object definition\n"
+            log("DEBUG", f"Pattern: {vcvars_data_object_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
+            patched_content = vcvars_data_object_pattern.sub(replacement_str, patched_content)
             modified = True
             log("INFO", "Neutralized direct 'vcvars_toolchain_data' object definition in 'BUILD.gn' to prevent syntax errors.", to_console=False)
 
         # --- Aggressively strip any orphaned commas or square brackets that might cause syntax errors (e.g., from removing items from a list) ---
         orphaned_punctuation_pattern = re.compile(r"^\s*[,}\]]\s*$", re.MULTILINE)
         initial_orphaned_content = patched_content
-        patched_content = orphaned_punctuation_pattern.sub("", patched_content)
+        replacement_str = r""
+        log("DEBUG", f"Pattern: {orphaned_punctuation_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
+        patched_content = orphaned_punctuation_pattern.sub(replacement_str, patched_content)
         if initial_orphaned_content != patched_content:
             modified = True
             log("INFO", "Removed orphaned commas and square/curly brackets to prevent syntax errors.", to_console=False)
@@ -901,7 +910,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
         )
         if exec_script_win_toolchain_pattern.search(patched_content):
             # FIX (v7.36): Escape captured group for safety before using in replacement
-            patched_content = exec_script_win_toolchain_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '\\\\') + "\n", patched_content)
+            patched_content = exec_script_win_toolchain_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '/') + "\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'win_toolchain_data' in '{toolchain_build_gn_path.name}'.", to_console=False)
 
@@ -1099,11 +1108,19 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
         deps_modified = True
 
     log("INFO", "Removing 'third_party/llvm-build' from DEPS.", to_console=False)
-    if re.search(r"\'third_party/llvm-build\':\s**Var\(.*?\),?\n?", patched_content, flags=re.DOTALL) or \
-       re.search(r"\'third_party/llvm-build\':\s*\'[^\n]*\',?\n?", patched_content, flags=re.DOTALL):
-        patched_content = re.sub(r"\'third_party/llvm-build\':\s*Var\(.*?\),?\n?", "", patched_content, flags=re.DOTALL)
-        patched_content = re.sub(r"\'third_party/llvm-build\':\s*\'[^\n]*\',?\n?", "", patched_content, flags=re.DOTALL)
+    # FIX (v7.36): Refined regex to avoid 'multiple repeat' error. Use non-greedy and explicit match.
+    # The original regex `Var\(.*?\),?` combined with `flags=re.DOTALL` could cause issues.
+    # We explicitly look for a single-line string literal, or a Var() call.
+    llvm_pattern_str = r"\'third_party/llvm-build\':\s*(?:Var\([^\)]*\)|'[^\n]*'),?\n?"
+    llvm_pattern = re.compile(llvm_pattern_str, flags=re.MULTILINE) # DOTALL removed as not needed for single line.
+    
+    if llvm_pattern.search(patched_content):
+        log("DEBUG", f"Found llvm-build pattern: {llvm_pattern_str}", to_console=False)
+        patched_content = llvm_pattern.sub("", patched_content)
         deps_modified = True
+    else:
+        log("DEBUG", f"No llvm-build pattern found in DEPS: {llvm_pattern_str}", to_console=False)
+
 
     log("INFO", "Removing 'tools/win' from DEPS.", to_console=False)
     if re.search(r"['\"]tools/win['\"]\s*:\s*['\"][^'\"]*['\"],?\n?", patched_content):
@@ -1117,9 +1134,15 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
 
     log("INFO", "Removing problematic cipd packages from DEPS.", to_console=False)
     initial_cipd_content = patched_content
-    patched_content = re.sub(r"\'infra/tools/win\S*?\'[^}]*?},\n", "", patched_content)
-    if initial_cipd_content != patched_content:
+    # FIX (v7.36): Ensure non-greedy match to avoid "multiple repeat"
+    cipd_pattern = re.compile(r"\'infra/tools/win\S*?\'[^}]*?},\n", flags=re.MULTILINE)
+    if cipd_pattern.search(patched_content):
+        log("DEBUG", f"Found cipd pattern: {cipd_pattern.pattern}", to_console=False)
+        patched_content = cipd_pattern.sub("", patched_content)
         deps_modified = True
+    else:
+        log("DEBUG", f"No cipd pattern found in DEPS: {cipd_pattern.pattern}", to_console=False)
+
 
     log("INFO", "Replaced 'simdutf' source with GitHub mirror in DEPS.", to_console=True)
     if "https://chromium.googlesource.com/chromium/src/third_party/simdutf" in patched_content:
@@ -1589,7 +1612,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.37.1tarted ===", to_console=True) # Updated start message
+    log("START", "=== CerebrumLux V8 Build v7.36 started ===", to_console=True) # Updated start message
     start_time = time.time()
     env = prepare_subprocess_env()
 
