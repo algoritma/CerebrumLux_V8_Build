@@ -1,59 +1,4 @@
 #!/usr/bin/env python3
-"""
-CerebrumLux V8 Build Automation v7.24 (Final Robust MinGW Build - Incorporating all feedback)
-- Auto-resume (incremental fetch + gclient sync)
-- Proxy fallback & git/http tuning for flaky networks
--  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
-- Copies built lib+headers into vcpkg installed tree for immediate use
-- Robust logging and retries
-- CRITICAL FIXES for gclient/gn/ninja execution & MinGW toolchain definition (args.gn & BUILD.gn for MinGW toolchain)
-- Handles vs_toolchain.py Python 2/3 incompatibility safely
-- Aggressive cleanup of problematic directories (optimized)
-- Corrected .gclient 'name' field
-- Improved libv8_monolith.a search path
-- Dynamic log file naming
-- Enhanced command execution logic for depot_tools binaries (gn.exe, gclient.py)
-- Patches for "stamp" tool and "v8_use_external_startup_data" assert in BUILD.gn files
-- FIX: Aggressive and persistent patch for vs_toolchain.py (pipes module & VS detection) before EACH gclient sync attempt.
-- FIX: Using sys.executable to run gclient.py directly for better Python environment control.
-- FIX: Reordered git checkout and DEPS/.gn patch steps to avoid "local changes would be overwritten" error.
-- FIX: Added GitHub mirror for 'simdutf' and 'zlib' in DEPS patching to mitigate HTTP 429 rate limit.
-- FIX: Enabled 'gclient sync -D' for automatic cleanup of unmanaged files.
-- FIX: Directly patched 'build/dotfile_settings.gni' to define 'exec_script_whitelist' within its scope.
-- FIX: Patched 'vs_toolchain.py' by PREPENDING a robust shim block, THEN DELETING original GetVisualStudioVersion(), DetectVisualStudioPath(), AND SetEnvironmentAndGetRuntimeDllDirs() bodies, resolving IndentationError and NameError.
-- FIX: Directly patched 'build/config/win/visual_studio_version.gni' to forcefully set dummy values for visual_studio_path, visual_studio_version, and visual_studio_runtime_dirs, AND COMMENTING OUT the exec_script call that fetches toolchain_data. Also fixed re.compile/re.sub flags issue and regex character set issue by using f-strings with explicit double backslashes and re.escape.
-- FIX: Corrected cmd_str initialization in run() helper and os.path.join in run_ninja_build().
-- FIX: Removed 'tools/win' and 'tools/clang' dependencies from DEPS to prevent HTTP 429 rate limit errors for these submodules.
-- FIX: Corrected retry sleep duration in gclient_sync_with_retry to use GCLIENT_RETRY_BACKOFF.
-- FIX: Moved vs_toolchain.py self-test to main() AFTER initial gclient sync to prevent 'Invalid directory name' error.
-- NEW: Disabled aggressive removal of V8_ROOT at start of script to allow incremental updates and prevent repeated full downloads.
-- NEW: More robust GN/Ninja binary detection using _find_tool helper function.
-- NEW: Improved onerror function for Windows compatibility using stat.S_IWRITE.
-- FIX (v7.1): Corrected vs_toolchain.py shim and visual_studio_version.gni patches to provide *non-empty dummy paths* for wdk_path, sdk_path, and visual_studio_path to bypass GN assertions requiring non-empty values when Visual Studio is conceptually "set".
-- FIX (v7.2): Resolved NameError: name 'vs_toolchain' is not defined by consistently using 'vs_toolchain_path.name' in log messages within gclient_sync_with_retry function.
-- FIX (v7.3): Add patch for 'build/toolchain/win/setup_toolchain.py' to bypass calls to vs_toolchain.DetectVisualStudioPath and vs_toolchain.GetVisualStudioVersion to resolve AttributeError.
-- FIX (v7.4): Corrected indentation in 'setup_toolchain.py' patch to resolve 'IndentationError: unexpected indent'.
-- FIX (v7.5): Patched 'setup_toolchain.py' to completely replace _LoadToolchainEnv, bypassing the 'vcvarsall.bat' check and returning a dummy environment.
-- FIX (v7.6): Further refined 'setup_toolchain.py' patch to ensure _LoadToolchainEnv returns a dictionary with all expected keys (vc_bin_dir, vc_lib_path, etc.) and added os.makedirs for dummy directories to bypass path existence checks.
-- FIX (v7.7): Made log() function more robust against I/O errors and added auto-patching of args.gn within run_gn_gen() to inject missing vcvars_toolchain_data variables based on GN error output.
-- FIX (v7.8): Corrected 'bad escape' error in _patch_setup_toolchain_py by using Path.as_posix() for dummy paths and fixed log() function typo for error file writing.
-- FIX (v7.9): Implemented automatic injection of 'vcvars_toolchain_data' object with all required dummy paths directly into args.gn within run_gn_gen() to resolve "No value named 'vc_lib_path' in scope 'vcvars_toolchain_data'" error and ensured corresponding dummy directories are created on disk.
-- FIX (v7.10): Corrected "May only use "." for identifiers" error in args.gn patching by pre-formatting paths with .as_posix() in Python, removing .replace() calls from GN strings.
-- FIX (v7.11): Further refined args.gn injection logic in run_gn_gen() for vcvars_toolchain_data to ensure paths are direct string literals using .as_posix() without any GN-side processing methods, addressing "May only use "." for identifiers" error. Updated shim version.
-- FIX (v7.12): Added a new patch function (_patch_build_gn) to neutralize the 'exec_script' call for 'setup_toolchain.py' within 'build/config/win/BUILD.gn', thereby relying purely on args.gn injection for 'vcvars_toolchain_data'. Updated shim version.
-- FIX (v7.13): Aggressively patched 'build/config/win/BUILD.gn' to replace direct accesses to 'vcvars_toolchain_data.<field>' with hardcoded dummy paths (using .as_posix()) after neutralizing the exec_script call, resolving "No value named 'vc_lib_path' in scope 'vcvars_toolchain_data'" error. All dummy path injections now consistently use .as_posix(). Updated shim version.
-- FIX (v7.14): Corrected "Invalid token" error in _patch_build_gn when replacing `vcvars_toolchain_data.<field>` by ensuring replacement strings for GN are exact string literals (e.g., `"C:/path"`) without extra backslashes in Python's re.sub method. Updated shim version.
-- FIX (v7.15): Implemented a prioritized patching order in _patch_build_gn to first replace all `defined(vcvars_toolchain_data.<field>)` calls with `true`, then handle direct assignments, resolving the `Bad thing passed to defined()` error. Updated shim version.
-- FIX (v7.16): Corrected `SyntaxError: closing parenthesis ')' does not match opening parenthesis '['` in `main()` function's `git reset` command. Updated shim version.
-- FIX (v7.17): Removed `/* ... */` style comments from `defined()` bypasses within `_patch_build_gn` function to comply with GN's strict `#` comment syntax, resolving `Invalid token` error. Updated shim version.
-- FIX (v7.18): Implemented a new patch function `_patch_toolchain_win_build_gn` to neutralize `win_toolchain_data = exec_script(...)` in `build/toolchain/win/BUILD.gn` and directly replace all accesses to `win_toolchain_data.<field>` with hardcoded dummy paths, addressing "No value named 'vc_bin_dir' in scope 'win_toolchain_data'" error. Also ensured dummy directories for these new paths are created. Updated shim version.
-- FIX (v7.19): Refined `_patch_toolchain_win_build_gn` to replace MSVC-specific tool definitions (`cl`, `link`, `lib`) directly with MinGW paths (or safe dummies) as literal strings, and implemented `_filter_gn_comments` to ensure strict GN comment syntax. Updated shim version.
-- FIX (v7.20): Reworked `_patch_toolchain_win_build_gn` to inject `win_toolchain_data` as a GN scope with pre-formatted paths, then let GN interpolation handle tool definitions. This resolves `Invalid token` errors related to embedded paths in tool definitions in `build/toolchain/win/BUILD.gn`. Updated shim version.
-- FIX (v7.21): Corrected `Expected ')'` error in `_patch_toolchain_win_build_gn` by ensuring `exec_script` neutralization leaves no remnant bad syntax and correctly injecting the `win_toolchain_data` object directly into the GN file. Updated shim version.
-- FIX (v7.22): Added `include_flags_imsvc: ''` to `win_toolchain_data` injection in `_patch_toolchain_win_build_gn` to resolve "No value named 'include_flags_imsvc'" error. Implemented `warnings.filterwarnings` for `DeprecationWarning` in `main()`. Updated shim version.
-- FIX (v7.23): Patched `_patch_toolchain_win_build_gn` to explicitly replace `sys_lib_flags = ...` and `sys_include_flags = ...` assignments with `sys_lib_flags = []` and `sys_include_flags = []` to satisfy GN's "Expecting assignment" rule. Updated shim version.
-- FIX (v7.24): Refined `_patch_toolchain_win_build_gn` regex for `sys_lib_flags` and `sys_include_flags` to be more general (`.*` instead of `\[[\s\S]*?\]`) and removed `re.DOTALL` to correctly handle single-line assignments, resolving "Expecting assignment or function call" error. Updated shim version.
-"""
 import os
 import sys
 import subprocess
@@ -335,7 +280,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         # FIX (v7.1): Changed wdk_path, sdk_path, and DetectVisualStudioPath to non-empty dummy paths.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.22) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.24 ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -887,7 +832,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
             "vc_bin_dir": (fake_vs_base_path_obj / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix(),
             "vc_lib_path": (fake_vs_base_path_obj / "VC" / "lib").as_posix(),
             "vc_include_path": (fake_vs_base_path_obj / "VC" / "include").as_posix(),
-            "sdk_dir": (fake_vs_base_path_path_obj / "SDK").as_posix(), # Ensure base SDK is also a Path
+            "sdk_dir": (fake_vs_base_path_obj / "SDK").as_posix(), # Ensure base SDK is also a Path
             "sdk_lib_path": (fake_vs_base_path_obj / "SDK" / "lib").as_posix(),
             "sdk_include_path": (fake_vs_base_path_obj / "SDK" / "include").as_posix(),
             "runtime_dirs": (fake_vs_base_path_obj / "redist").as_posix(),
