@@ -807,18 +807,16 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
 
         # Then, replace all other accesses/assignments to vcvars_toolchain_data.<field> with dummy paths
         # FIX (v7.33): Corrected lambda replacement. The previous lambda was causing bad escape issues.
-        # Now explicitly construct the replacement string based on context captured by regex.
+        # Now use a simpler pattern that only matches the vcvars_toolchain_data.field part directly
+        # and replaces it with the dummy path.
         for field, dummy_path in dummy_vcvars_paths.items():
             access_pattern = re.compile(
-                r"(?P<pre_assign>\b[a-zA-Z0-9_]+\s*=\s*)?(?P<vcvars_ref>vcvars_toolchain_data\." + re.escape(field) + r")",
+                r"vcvars_toolchain_data\." + re.escape(field),
                 re.MULTILINE
             )
             initial_access_replace_text = patched_content
-            # Use a lambda to dynamically build the replacement based on captured groups.
-            patched_content = access_pattern.sub(
-                lambda m: f"{m.group('pre_assign') or ''}\"{dummy_path}\"",
-                patched_content
-            )
+            # Replace directly with the dummy path as a string literal.
+            patched_content = access_pattern.sub(f'"{dummy_path}"', patched_content)
             if initial_access_replace_text != patched_content:
                 modified = True
                 log("INFO", f"Replaced all direct accesses/assignments for 'vcvars_toolchain_data.{field}' with hardcoded dummy path in '{build_gn_path.name}'.", to_console=False)
@@ -834,11 +832,8 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             log("INFO", "Neutralized direct 'vcvars_toolchain_data' object definition in 'BUILD.gn' to prevent syntax errors.", to_console=False)
 
         # --- Aggressively strip any orphaned commas or square brackets that might cause syntax errors (e.g., from removing items from a list) ---
-        # This addresses issues like the `],` error found in v7.30 and v7.31.
-        # FIX (v7.32): Ensure it also removes lines that only contain commas (e.g., after an element in a list is removed)
-        orphaned_punctuation_pattern = re.compile(r"^\s*[,\}\]]\s*$", re.MULTILINE)
+        orphaned_punctuation_pattern = re.compile(r"^\s*[,}\]]\s*$", re.MULTILINE)
         initial_orphaned_content = patched_content
-        # Remove any lines that only contain orphaned commas or closing square/curly brackets
         patched_content = orphaned_punctuation_pattern.sub("", patched_content)
         if initial_orphaned_content != patched_content:
             modified = True
@@ -846,9 +841,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
 
 
         if modified:
-            # FIX (v7.32): Apply general comment filter AFTER all other patching steps
-            # to ensure intermediate // comments are also handled
-            patched_content = _filter_gn_comments(patched_content) 
+            patched_content = _filter_gn_comments(patched_content)
             try:
                 bak_path = build_gn_path.with_suffix(build_gn_path.suffix + ".cerebrumlux.bak")
                 if not bak_path.exists():
@@ -1566,18 +1559,6 @@ file(COPY ${{V8_HEADERS_TO_COPY}} DESTINATION ${{CURRENT_PACKAGES_DIR}}/include/
 file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/share/${{PORT}}" RENAME copyright)
 """
     with portfile_path.open("w", encoding="utf-8") as f:
-        f.write(cmake_content)
-    log("INFO", f"Updated {portfile_path}")
-
-    manifest = {
-        "name": "v8",
-        "version-string": version,
-        "description": "Google V8 JavaScript engine (MinGW-w64 compatible, prebuilt by CerebrumLux custom script)",
-        "homepage": homepage,
-        "license": "BSD-3-Clause",
-        "supports": "windows & !uwp"
-    }
-    with manifest_path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     log("INFO", f"Created/updated {manifest_path}")
 
