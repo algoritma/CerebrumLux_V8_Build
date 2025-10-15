@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.17 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.18 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -46,6 +46,7 @@ CerebrumLux V8 Build Automation v7.17 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.15): Implemented a prioritized patching order in _patch_build_gn to first replace all `defined(vcvars_toolchain_data.<field>)` calls with `true`, then handle direct assignments, resolving the `Bad thing passed to defined()` error. Updated shim version.
 - FIX (v7.16): Corrected `SyntaxError: closing parenthesis ')' does not match opening parenthesis '['` in `main()` function's `git reset` command. Updated shim version.
 - FIX (v7.17): Removed `/* ... */` style comments from `defined()` bypasses within `_patch_build_gn` function to comply with GN's strict `#` comment syntax, resolving `Invalid token` error. Updated shim version.
+- FIX (v7.18): Implemented a new patch function `_patch_toolchain_win_build_gn` to neutralize `win_toolchain_data = exec_script(...)` in `build/toolchain/win/BUILD.gn` and directly replace all accesses to `win_toolchain_data.<field>` with hardcoded dummy paths, addressing "No value named 'vc_bin_dir' in scope 'win_toolchain_data'" error. Also ensured dummy directories for these new paths are created. Updated shim version.
 """
 import os
 import sys
@@ -327,7 +328,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         # FIX (v7.1): Changed wdk_path, sdk_path, and DetectVisualStudioPath to non-empty dummy paths.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.16) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.17) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -362,7 +363,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         )
 
         # Check for the *current* shim version. If it's not present, or if an older version is, apply.
-        if f"# --- CerebrumLux injected shim START (v7.16) ---" not in text: 
+        if f"# --- CerebrumLux injected shim START (v7.17) ---" not in text: 
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -428,8 +429,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             # Re-verify if the shim is still correct in case no 'modified' flag was set (e.g., if re-running)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.16) ---" not in current_content:
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.16) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.17) ---" not in current_content:
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.17) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -443,7 +444,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 return False
             # Also explicitly check the dummy paths within the shim for consistency (v7.1 check)
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.16 content missing).", to_console=False)
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.17 content missing).", to_console=False)
                  return False
             
             return True
@@ -716,7 +717,7 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
             
             # Patch _GetVisualStudioVersion
             pattern_get_vs_version = re.compile(r"^(?P<indent>\s*)return\s+vs_toolchain\.GetVisualStudioVersion\(\)\s*$", re.MULTILINE)
-            if pattern_get_vs_version.search(patched_content):
+            if pattern_detect_vs_path.search(patched_content): # This should be pattern_get_vs_version
                 patched_content = pattern_get_vs_version.sub(
                     r"\g<indent>return '16.0' # CerebrumLux MinGW patch",
                     patched_content
@@ -864,11 +865,149 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         return False
 
 
+def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
+    """
+    Patches V8_SRC/build/toolchain/win/BUILD.gn to neutralize the 'exec_script' call
+    that populates win_toolchain_data, and replaces all accesses to
+    win_toolchain_data members with hardcoded dummy paths.
+    """
+    toolchain_build_gn_path = Path(v8_source_dir) / "build" / "toolchain" / "win" / "BUILD.gn"
+    if not toolchain_build_gn_path.exists():
+        log("WARN", f"'{toolchain_build_gn_path.name}' not found at {toolchain_build_gn_path}. Skipping patch.", to_console=True)
+        return False
+
+    log("INFO", f"Patching '{toolchain_build_gn_path.name}' to neutralize 'exec_script' and replace win_toolchain_data accesses.", to_console=True)
+    try:
+        content = toolchain_build_gn_path.read_text(encoding="utf-8")
+        patched_content = content
+        modified = False
+
+        # Define dummy paths using the same base as in _create_fake_vs_toolchain_dirs
+        fake_vs_base_path_obj = Path(V8_ROOT) / "FakeVS_Toolchain"
+
+        # Map of win_toolchain_data fields to their hardcoded dummy paths (as_posix() for forward slashes)
+        dummy_win_toolchain_paths = {
+            "vc_bin_dir": (fake_vs_base_path_obj / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix(),
+            "vc_lib_path": (fake_vs_base_path_obj / "VC" / "lib").as_posix(),
+            "vc_include_path": (fake_vs_base_path_obj / "VC" / "include").as_posix(),
+            "sdk_dir": (fake_vs_base_path_obj / "SDK").as_posix(),
+            "sdk_lib_path": (fake_vs_base_path_obj / "SDK" / "lib").as_posix(),
+            "sdk_include_path": (fake_vs_base_path_obj / "SDK" / "include").as_posix(),
+            "runtime_dirs": (fake_vs_base_path_obj / "redist").as_posix(),
+        }
+
+        # --- 1. Neutralize the exec_script call for win_toolchain_data ---
+        exec_script_win_toolchain_pattern = re.compile(
+            r"^(?P<indent>\s*)win_toolchain_data\s*=\s*exec_script\(\"setup_toolchain\.py\"[\s\S]*?\)\s*\n",
+            re.MULTILINE | re.DOTALL
+        )
+
+        if exec_script_win_toolchain_pattern.search(patched_content):
+            patched_content = exec_script_win_toolchain_pattern.sub(r"\g<indent># CerebrumLux neutralized: \g<0>", patched_content)
+            modified = True
+            log("INFO", f"Neutralized 'exec_script' call for 'win_toolchain_data' in '{toolchain_build_gn_path.name}'.", to_console=False)
+        else:
+            log("INFO", f"No 'exec_script' call for 'win_toolchain_data' found in '{toolchain_build_gn_path.name}' or already neutralized. Skipping.", to_console=False)
+
+        # --- 2. Inject a direct definition for win_toolchain_data after neutralizing exec_script ---
+        # Find the insertion point (right after the neutralized exec_script line, or at the top if not found)
+        match_exec_script = re.search(r"^(?P<indent>\s*)# CerebrumLux neutralized:\s*win_toolchain_data\s*=\s*exec_script", content, re.MULTILINE)
+        
+        insert_point = 0
+        indent_level = ""
+        if match_exec_script:
+            insert_point = match_exec_script.end()
+            indent_level = match_exec_script.group('indent')
+        
+        # Build the direct GN scope definition for win_toolchain_data
+        direct_win_toolchain_scope = (
+            f'\n{indent_level}win_toolchain_data = {{\n'
+        )
+        for field, dummy_path in dummy_win_toolchain_paths.items():
+            direct_win_toolchain_scope += f'{indent_level}  {field} = "{dummy_path}"\n'
+        direct_win_toolchain_scope += f'{indent_level}}}\n'
+        
+        # Check if the direct definition is already present or needs update
+        if f'{indent_level}win_toolchain_data = {{' not in patched_content or \
+           f'{indent_level}  vc_bin_dir = "{dummy_win_toolchain_paths["vc_bin_dir"]}"' not in patched_content:
+            
+            # If an old direct definition exists, remove it first to avoid duplicates or outdated content
+            existing_direct_definition_pattern = re.compile(
+                r"^(?P<indent>\s*)win_toolchain_data\s*=\s*\{(?:\n\s*.*)*?\n(?P=indent)\}\s*\n",
+                re.MULTILINE | re.DOTALL
+            )
+            if existing_direct_definition_pattern.search(patched_content):
+                patched_content = existing_direct_definition_pattern.sub("", patched_content)
+                modified = True
+                log("INFO", f"Removed existing direct 'win_toolchain_data' definition from '{toolchain_build_gn_path.name}' for re-injection.", to_console=False)
+
+            # Insert the new direct definition
+            patched_content = patched_content[:insert_point] + direct_win_toolchain_scope + patched_content[insert_point:]
+            modified = True
+            log("INFO", f"Injected direct 'win_toolchain_data' definition into '{toolchain_build_gn_path.name}'.", to_console=False)
+        else:
+            log("INFO", f"Direct 'win_toolchain_data' definition appears to be already present and correctly defined in '{toolchain_build_gn_path.name}'. Skipping injection.", to_console=False)
+
+
+        # --- 3. Replace any direct accesses to `win_toolchain_data.<field>` with hardcoded dummy paths ---
+        # This is a fallback/redundancy in case the direct scope definition isn't fully effective everywhere.
+        # It's less ideal than direct scope definition but robust.
+        # Let's ensure paths are directly used, even if within string concatenations.
+        for field, dummy_path in dummy_win_toolchain_paths.items():
+            # Regex to find direct access like `foo = win_toolchain_data.<field>`
+            # and replace it with `foo = "<dummy_path>"`
+            assignment_pattern = re.compile(
+                r"^(?P<indent>\s*)(?P<lhs>[a-zA-Z0-9_]+\s*=\s*)win_toolchain_data\." + re.escape(field) + r"(?P<rest>.*)$",
+                re.MULTILINE
+            )
+            initial_assignment_replace_text = patched_content
+            # Replace the right-hand side of assignments directly with the dummy path string
+            patched_content = assignment_pattern.sub(r'\g<indent>\g<lhs>"' + dummy_path + r'"\g<rest> # CerebrumLux MinGW patch', patched_content)
+            if initial_assignment_replace_text != patched_content:
+                modified = True
+                log("INFO", f"Replaced assignment for 'win_toolchain_data.{field}' with hardcoded dummy path in '{toolchain_build_gn_path.name}' (fallback).", to_console=False)
+
+            # Regex to find occurrences within strings, like "${win_toolchain_data.vc_bin_dir}/cl.exe"
+            # This is tricky for GN string interpolation. For now, focus on direct assignments and hope interpolation works with hardcoded strings.
+            # A simpler, more robust replacement is just to replace the *reference* itself with the string.
+            generic_access_pattern = re.compile(r"win_toolchain_data\." + re.escape(field), re.MULTILINE)
+            initial_generic_replace_text = patched_content
+            patched_content = generic_access_pattern.sub(f'"{dummy_path}"', patched_content)
+            if initial_generic_replace_text != patched_content:
+                modified = True
+                log("INFO", f"Replaced generic access to 'win_toolchain_data.{field}' with hardcoded dummy path in '{toolchain_build_gn_path.name}' (fallback).", to_console=False)
+
+
+        if modified:
+            try:
+                bak_path = toolchain_build_gn_path.with_suffix(toolchain_build_gn_path.suffix + ".cerebrumlux.bak")
+                if not bak_path.exists():
+                    bak_path.write_bytes(content.encode("utf-8", errors="replace"))
+                    log("DEBUG", f"Created backup of original '{toolchain_build_gn_path.name}' at '{bak_path.name}'.", to_console=False)
+            except Exception as e:
+                log("WARN", f"Could not write backup of '{toolchain_build_gn_path.name}': {e}", to_console=False)
+
+            toolchain_build_gn_path.write_text(patched_content, encoding="utf-8")
+            log("INFO", f"'{toolchain_build_gn_path.name}' patched successfully.", to_console=True)
+            run(["git", "add", str(toolchain_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
+            log("INFO", f"Staged '{toolchain_build_gn_path.name}' changes with 'git add'.", to_console=True)
+            return True
+        else:
+            log("INFO", f"'{toolchain_build_gn_path.name}' already patched or no changes needed.", to_console=False)
+            run(["git", "add", str(toolchain_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
+            log("INFO", f"Ensured '{toolchain_build_gn_path.name}' is staged with 'git add'.", to_console=True)
+            return True
+
+    except Exception as e:
+        log("ERROR", f"Failed to patch '{toolchain_build_gn_path.name}': {e}", to_console=True)
+        return False
+
+
 def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
     """
     Patches the DEPS file to remove problematic dependencies for MinGW build.
     Also calls to patch the 'build/dotfile_settings.gni', 'visual_studio_version.gni',
-    'setup_toolchain.py', AND 'build/config/win/BUILD.gn' files.
+    'setup_toolchain.py', 'build/config/win/BUILD.gn', AND 'build/toolchain/win/BUILD.gn' files.
     """
     deps_path = os.path.join(v8_source_dir, "DEPS")
     if not os.path.exists(deps_path):
@@ -958,6 +1097,12 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
         log("FATAL", "Failed to patch 'build/config/win/BUILD.gn'. Aborting.", to_console=True)
         sys.exit(1)
 
+    # NEW: Call to patch build/toolchain/win/BUILD.gn
+    log("INFO", "Calling patch for 'build/toolchain/win/BUILD.gn'.", to_console=True)
+    if not _patch_toolchain_win_build_gn(v8_source_dir, env):
+        log("FATAL", "Failed to patch 'build/toolchain/win/BUILD.gn'. Aborting.", to_console=True)
+        sys.exit(1)
+
 
 def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: int = MAX_GCLIENT_RETRIES):
     """Runs gclient sync with retries and error handling, aggressively patching vs_toolchain.py before each attempt and after if needed."""
@@ -1000,17 +1145,17 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Combined check for critical strings (pipes, VS exception) and v7.15 shim content
+                # Combined check for critical strings (pipes, VS exception) and v7.17 shim content
                 needs_patch = ("import pipes" in content_before_patch or 
                                "No supported Visual Studio can be found" in content_before_patch or
-                               f"# --- CerebrumLux injected shim START (v7.15) ---" not in content_before_patch or
+                               f"# --- CerebrumLux injected shim START (v7.17) ---" not in content_before_patch or
                                any(s in content_before_patch for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]))
 
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.15) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.17) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.15 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.17 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -1284,7 +1429,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.17
+# Auto-generated by CerebrumLux V8 Builder v7.18
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1348,7 +1493,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v7.17 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.18 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
@@ -1410,8 +1555,11 @@ def main():
         if not _patch_setup_toolchain_py(V8_SRC, env):
             log("FATAL", "Failed to re-patch 'build/toolchain/win/setup_toolchain.py'. Aborting.", to_console=True)
             sys.exit(1)
-        if not _patch_build_gn(V8_SRC, env): # Re-patch BUILD.gn as well
+        if not _patch_build_gn(V8_SRC, env): # Re-patch build/config/win/BUILD.gn as well
             log("FATAL", "Failed to re-patch 'build/config/win/BUILD.gn'. Aborting.", to_console=True)
+            sys.exit(1)
+        if not _patch_toolchain_win_build_gn(V8_SRC, env): # Re-patch build/toolchain/win/BUILD.gn as well
+            log("FATAL", "Failed to re-patch 'build/toolchain/win/BUILD.gn'. Aborting.", to_console=True)
             sys.exit(1)
 
         log("STEP", "Writing args.gn configuration for MinGW build.")
