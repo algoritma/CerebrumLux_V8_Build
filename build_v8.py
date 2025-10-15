@@ -1589,7 +1589,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.36 started ===", to_console=True) # Updated start message
+    log("START", "=== CerebrumLux V8 Build v7.37.1tarted ===", to_console=True) # Updated start message
     start_time = time.time()
     env = prepare_subprocess_env()
 
