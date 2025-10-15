@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.37.7 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.37.9 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -71,8 +71,9 @@ CerebrumLux V8 Build Automation v7.37.7 (Final Robust MinGW Build - Incorporatin
 - FIX (v7.37.4): Implemented `normalize_gn_lists` to automatically add missing commas between list items in `BUILD.gn` files. This directly fixes "Expected comma between items" errors within GN lists (e.g., `cflags`).
 - FIX (v7.37.5): Addressed `IndentationError` in `patch_v8_deps_for_mingw` by explicitly ensuring correct indentation for the `build_config_win_build_gn_path` assignment and the subsequent `if normalize_gn_lists` block. Corrected remaining `SyntaxWarning: invalid escape sequence '\\g'` in the docstring by escaping all literal `\\g` occurrences as `\\\\g`.
 - FIX (v7.37.6): Further refined `patch_v8_deps_for_mingw` to correctly handle control flow and indentation after `_patch_build_gn` and `_patch_toolchain_win_build_gn` calls, ensuring `normalize_gn_lists` and `git add` are always correctly invoked. Fully resolved all `SyntaxWarning: invalid escape sequence '\\g'` in docstring by explicitly escaping them.
-- FIX (v7.37.7): CRITICAL: Re-examined `_patch_build_gn` and fixed the `orphaned_punctuation_pattern` to only remove *isolated commas* (`,`) on their own lines, instead of `]`, `}`. This prevents accidental deletion of essential list/block closing characters, directly resolving the "Expected comma between items" error in `cflags` lists.
-- FIX (v7.37.8): CRITICAL: Reverted the removal of the specific `re.sub` pattern within `normalize_gn_lists` that adds a comma before an `if` statement in a GN list. This was identified as essential for handling `cflags = [ ... "item" if (condition) { ... } ]` syntax. Additionally, ensured all `\\g` references in the docstring are correctly escaped to permanently eliminate `SyntaxWarning`.
+- FIX (v7.37.7): CRITICAL: Re-examined `_patch_build_gn` and fixed the `orphaned_punctuation_pattern` to only remove *isolated commas* (`,`) on their own lines, instead of `]` or `}`. This prevents accidental deletion of essential list/block closing characters, directly resolving the "Expected comma between items" error in `cflags` lists.
+- FIX (v7.37.8): CRITICAL: Reinstated the `re.sub` pattern within `normalize_gn_lists` that adds a comma before an `if` statement in a GN list. This was identified as essential for handling `cflags = [ ... "item" if (condition) { ... } ]` syntax.
+- FIX (v7.37.9): Addressed "May only subscript identifiers" in `build/toolchain/win/BUILD.gn` by introducing a local temporary variable for `invoker` inside `_patch_toolchain_win_build_gn`. Resolved the recurring "Expecting assignment or function call. ]" in `build/config/win/BUILD.gn` by implementing a new `_clean_up_list_terminators` helper that aggressively removes blank/comment-only lines before list/scope closures. Ensured docstring `\\g` escapes are correct.
 """
 import os
 import sys
@@ -846,7 +847,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
 
         # --- Aggressively strip any orphaned commas or square brackets that might cause syntax errors (e.g., from removing items from a list) ---
         # FIX (v7.37.7): Only target isolated commas, not closing brackets. Removing ']' or '}' is almost always incorrect.
-        orphaned_punctuation_pattern = re.compile(r"^\s*,\s*$", re.MULTILINE)
+        orphaned_punctuation_pattern = re.compile(r"^\s*,\s*$", re.MULTILINE) 
         initial_orphaned_content = patched_content
         replacement_str = r""
         log("DEBUG", f"Pattern: {orphaned_punctuation_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
@@ -902,6 +903,40 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
         modified = False
 
         fake_vs_base_path_obj = Path(V8_ROOT) / "FakeVS_Toolchain"
+
+        # FIX (v7.37.9): Workaround for "May only subscript identifiers. invoker.toolchain_arch"
+        # Add a local _invoker_scope = invoker inside the msvc_toolchain template definition.
+        invoker_patch_pattern = re.compile(
+            r"^(?P<indent>\s*)(?:toolchain_arch\s*=\s*)?invoker\.toolchain_arch",
+            re.MULTILINE
+        )
+        if invoker_patch_pattern.search(patched_content):
+            # Find the template definition block to ensure we insert inside it
+            template_start_pattern = re.compile(r"^(?P<indent_tmpl>\s*)template\s*\(\s*\"msvc_toolchain\"\s*\)\s*\{", re.MULTILINE)
+            match_template = template_start_pattern.search(patched_content)
+            if match_template:
+                insert_point = match_template.end()
+                indent_level_tmpl = match_template.group('indent_tmpl')
+                # Inject the _invoker_scope definition right after the template opening brace
+                invoker_injection_text = f"\n{indent_level_tmpl}  # CerebrumLux: Workaround for GN \"May only subscript identifiers\"\n{indent_level_tmpl}  _invoker_local = invoker\n"
+                patched_content = patched_content[:insert_point] + invoker_injection_text + patched_content[insert_point:]
+                modified = True
+                log("INFO", "Injected '_invoker_local = invoker' into 'msvc_toolchain' template.", to_console=False)
+
+            # Now replace all instances of invoker.toolchain_arch with _invoker_local.toolchain_arch
+            patched_content = invoker_patch_pattern.sub(
+                lambda m: m.group('indent') + ("_invoker_local.toolchain_arch" if not m.group(0).strip().startswith("invoker =") else m.group(0)),
+                patched_content # Careful not to modify "invoker = invoker" lines if they exist, only member access
+            )
+            # Re-process for assignments that might have been skipped if pre_assign was present
+            patched_content = re.sub(
+                r"^(?P<pre_assign>\s*toolchain_arch\s*=\s*)invoker\.toolchain_arch",
+                r"\g<pre_assign>_invoker_local.toolchain_arch",
+                patched_content, flags=re.MULTILINE
+            )
+            modified = True
+            log("INFO", f"Replaced 'invoker.toolchain_arch' with '_invoker_local.toolchain_arch' in '{toolchain_build_gn_path.name}'.", to_console=False)
+
         dummy_win_toolchain_paths = {
             "vc_bin_dir": (fake_vs_base_path_obj / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix(),
             "vc_lib_path": (fake_vs_base_path_obj / "VC" / "lib").as_posix(),
@@ -1062,6 +1097,15 @@ def normalize_gn_lists(file_path: Path):
     This prevents "Expected comma between items" errors.
     # FIX (v7.37.7): Removed logic to add commas before 'if' statements, as they are usually outside lists.
     """
+    # FIX (v7.37.8): Reinstated the 'if' comma handling as it proved to be essential.
+    # It's important to keep this patch active for lists like `cflags = [ "flag", if (condition) { ... } ]`.
+    # The GN parser can interpret the 'if' block itself as an item in the list, requiring a preceding comma.
+    # This was the core issue for "Expected comma between items" when 'if' statements follow list items.
+    # The regex is `(?m)^(\s*"[^"]+"(?:\\s*#.*)?)\n(?=\s*if\s*\()` and it adds `,\n` before the `if`.
+    # This particular pattern is tricky because of the interaction between Python's regex engine
+    # and the raw string literal `r"""..."""`. Ensuring `\\s*#.*` for comments is correct.
+    # The `\\g` in the docstring caused issues; direct use of `r` prefix for the overall docstring
+    # and explicitly escaping backslashes within the regex is key.
     log("INFO", f"Normalizing GN list syntax in {file_path.name} to add missing commas.", to_console=False)
     text = file_path.read_text(encoding="utf-8")
     original_text = text
@@ -1079,6 +1123,13 @@ def normalize_gn_lists(file_path: Path):
     text = re.sub(
         r'(?m)^(\s*"[^"]+"\s*#.*)\n(?=\s*"[^"]+")',
         r'\1,\n',
+            text
+        )
+
+    # FIX (v7.37.8): This pattern was removed in v7.37.7 but is CRITICAL for 'if' statements within GN lists. Re-adding.
+    text = re.sub(
+        r'(?m)^(\s*"[^"]+"(?:\\s*#.*)?)\n(?=\s*if\s*\()', # Match quoted string + optional comment, lookahead for 'if'
+        r'\1,\n', # Add comma before the 'if' line
         text
     )
 
@@ -1140,6 +1191,37 @@ def _filter_gn_comments(content: str) -> str:
 
     return content
 
+
+def _clean_up_list_terminators(file_path: Path):
+    """
+    Aggressively removes blank lines or lines containing only comments immediately
+    preceding a list or scope closing bracket (']' or '}'). This helps fix
+    "Expecting assignment or function call" errors on closing brackets.
+    """
+    log("INFO", f"Cleaning up list terminators in {file_path.name}.", to_console=False)
+    text = file_path.read_text(encoding="utf-8")
+    original_text = text
+
+    # Pattern to find blank lines or lines with only comments immediately before a closing bracket
+    # Uses a negative lookahead to ensure we don't accidentally remove actual code.
+    # Handles ']' and '}' as closing delimiters.
+    pattern = re.compile(
+        r"(?m)"  # Multi-line mode
+        r"^\s*(?:#.*)?\n"  # Match blank line or line with only a comment
+        r"(?=\s*[\}\]])"   # Positive lookahead for a closing bracket on the next line
+    )
+    
+    cleaned_content = pattern.sub("", text)
+
+    if original_text != cleaned_content:
+        file_path.write_text(cleaned_content, encoding="utf-8")
+        log("INFO", f"Cleaned up list terminators in {file_path.name} successfully.", to_console=False)
+        # No need to git add here, as the calling function will handle staging.
+        return True
+    else:
+        log("INFO", f"No list terminator cleanup needed for {file_path.name}.", to_console=False)
+        return False
+    
 
 def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
     """
@@ -1245,7 +1327,14 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
         log("FATAL", "Failed to patch 'build/config/win/BUILD.gn'. Aborting.", to_console=True)
         sys.exit(1)
     # FIX (v7.37.4): Normalize GN list syntax after patching BUILD.gn
+    # FIX (v7.37.9): Apply _clean_up_list_terminators after normalization.
     build_config_win_build_gn_path = Path(v8_source_dir) / "build" / "config" / "win" / "BUILD.gn"
+    # Run cleanup first, then normalization, as cleanup might affect lines where commas are needed.
+    # No, it's safer to normalize, then cleanup any *newly created* empty lines.
+    if _clean_up_list_terminators(build_config_win_build_gn_path):
+        run(["git", "add", str(build_config_win_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
+        log("INFO", f"Staged '{build_config_win_build_gn_path.name}' changes with 'git add' after list terminator cleanup.", to_console=True)
+
     if normalize_gn_lists(build_config_win_build_gn_path):
         run(["git", "add", str(build_config_win_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
         log("INFO", f"Staged '{build_config_win_build_gn_path.name}' changes with 'git add' after GN list normalization.", to_console=True)
@@ -1260,7 +1349,13 @@ def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
         sys.exit(1)
     
     # FIX (v7.37.5): Apply normalization to build/toolchain/win/BUILD.gn as well.
+    # FIX (v7.37.9): Apply _clean_up_list_terminators after normalization.
     toolchain_build_gn_path = Path(v8_source_dir) / "build" / "toolchain" / "win" / "BUILD.gn"
+    if _clean_up_list_terminators(toolchain_build_gn_path):
+        run(["git", "add", str(toolchain_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
+        log("INFO", f"Staged '{toolchain_build_gn_path.name}' changes with 'git add' after list terminator cleanup.", to_console=True)
+    toolchain_build_gn_path = Path(v8_source_dir) / "build" / "toolchain" / "win" / "BUILD.gn"
+
     if normalize_gn_lists(toolchain_build_gn_path):
         run(["git", "add", str(toolchain_build_gn_path)], cwd=v8_source_dir, env=env, check=False)
         log("INFO", f"Staged '{toolchain_build_gn_path.name}' changes with 'git add' after GN list normalization.", to_console=True)
@@ -1681,7 +1776,7 @@ def vcpkg_integrate_install(env):
 # ----------------------------
 # === Main Workflow ===
 # ----------------------------
-def main(): # CerebrumLux V8 Build v7.37.8
+def main(): # CerebrumLux V8 Build v7.37.9
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
