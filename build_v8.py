@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.37.6 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.37.7 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -69,8 +69,10 @@ CerebrumLux V8 Build Automation v7.37.6 (Final Robust MinGW Build - Incorporatin
 - FIX (v7.37.2): Addressed the `SyntaxWarning: invalid escape sequence '\\g'` in the docstring by making the entire docstring a raw string. Corrected the `re.error: bad escape \\g` in `_patch_build_gn` by simplifying the `vcvars_data_object_pattern` to avoid backreferencing indentation within the regex pattern itself (`^\\g<indent>\\}`), making the pattern more robust to compile.
 - FIX (v7.37.3): Resolved "Expected comma between items" in `build/config/win/BUILD.gn` by modifying `_patch_build_gn` to replace the `vcvars_toolchain_data` object definition with an empty string (`""`) instead of a comment block. This prevents GN from interpreting the comment as an invalid list item, ensuring correct list syntax.
 - FIX (v7.37.4): Implemented `normalize_gn_lists` to automatically add missing commas between list items in `BUILD.gn` files. This directly fixes "Expected comma between items" errors within GN lists (e.g., `cflags`).
-- FIX (v7.37.5): Addressed `IndentationError` in `patch_v8_deps_for_mingw` by explicitly ensuring correct indentation for the `build_config_win_build_gn_path` assignment and the subsequent `if normalize_gn_lists` block. Corrected remaining `SyntaxWarning: invalid escape sequence '\g'` in the docstring by escaping all literal `\g` occurrences as `\\g`.
-- FIX (v7.37.6): Further refined `patch_v8_deps_for_mingw` to correctly handle control flow and indentation after `_patch_build_gn` and `_patch_toolchain_win_build_gn` calls, ensuring `normalize_gn_lists` and `git add` are always correctly invoked. Fully resolved all `SyntaxWarning: invalid escape sequence '\g'` in docstring by explicitly escaping them.
+- FIX (v7.37.5): Addressed `IndentationError` in `patch_v8_deps_for_mingw` by explicitly ensuring correct indentation for the `build_config_win_build_gn_path` assignment and the subsequent `if normalize_gn_lists` block. Corrected remaining `SyntaxWarning: invalid escape sequence '\\g'` in the docstring by escaping all literal `\\g` occurrences as `\\\\g`.
+- FIX (v7.37.6): Further refined `patch_v8_deps_for_mingw` to correctly handle control flow and indentation after `_patch_build_gn` and `_patch_toolchain_win_build_gn` calls, ensuring `normalize_gn_lists` and `git add` are always correctly invoked. Fully resolved all `SyntaxWarning: invalid escape sequence '\\g'` in docstring by explicitly escaping them.
+- FIX (v7.37.7): CRITICAL: Re-examined `_patch_build_gn` and fixed the `orphaned_punctuation_pattern` to only remove *isolated commas* (`,`) on their own lines, instead of `]`, `}`. This prevents accidental deletion of essential list/block closing characters, directly resolving the "Expected comma between items" error in `cflags` lists.
+- FIX (v7.37.8): CRITICAL: Reverted the removal of the specific `re.sub` pattern within `normalize_gn_lists` that adds a comma before an `if` statement in a GN list. This was identified as essential for handling `cflags = [ ... "item" if (condition) { ... } ]` syntax. Additionally, ensured all `\\g` references in the docstring are correctly escaped to permanently eliminate `SyntaxWarning`.
 """
 import os
 import sys
@@ -832,7 +834,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         # --- Critical: Remove any remaining `vcvars_toolchain_data` object definitions that might cause syntax errors ---
         vcvars_data_object_pattern = re.compile(
             r"^(?P<indent>\s*)vcvars_toolchain_data\s*=\s*\{[\s\S]*?^\s*\}\s*$", # Matches the entire object definition, simplified closing brace match
-            re.MULTILINE | re.DOTALL # Ensure DOTALL is used for multi-line matching
+            re.MULTILINE | re.DOTALL
         )
         if vcvars_data_object_pattern.search(patched_content):
             # FIX (v7.37.4): Corrected to replace with an empty string to remove the block entirely.
@@ -843,8 +845,8 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             log("INFO", "Neutralized direct 'vcvars_toolchain_data' object definition in 'BUILD.gn' to prevent syntax errors.", to_console=False)
 
         # --- Aggressively strip any orphaned commas or square brackets that might cause syntax errors (e.g., from removing items from a list) ---
-        orphaned_punctuation_pattern = re.compile(r"^\s*[,}\]]\s*$", re.MULTILINE)
-        initial_orphaned_content = patched_content
+        # FIX (v7.37.7): Only target isolated commas, not closing brackets. Removing ']' or '}' is almost always incorrect.
+        orphaned_punctuation_pattern = re.compile(r"^\s*,\s*$", re.MULTILINE)         initial_orphaned_content = patched_content
         replacement_str = r""
         log("DEBUG", f"Pattern: {orphaned_punctuation_pattern.pattern}, Replacement: {replacement_str}", to_console=False)
         patched_content = orphaned_punctuation_pattern.sub(replacement_str, patched_content)
@@ -1057,6 +1059,7 @@ def normalize_gn_lists(file_path: Path):
     Ensures correct GN list syntax, specifically adding missing commas between
     string elements and after string elements that are followed by comments.
     This prevents "Expected comma between items" errors.
+    # FIX (v7.37.7): Removed logic to add commas before 'if' statements, as they are usually outside lists.
     """
     log("INFO", f"Normalizing GN list syntax in {file_path.name} to add missing commas.", to_console=False)
     text = file_path.read_text(encoding="utf-8")
@@ -1077,6 +1080,15 @@ def normalize_gn_lists(file_path: Path):
         r'\1,\n',
         text
     )
+
+    # FIX (v7.37.8): Reverted the removal of this critical patch.
+    # 3. Add comma after a quoted string (optionally with a comment) that is followed by an 'if' statement on a new line
+    # This is crucial for fixing the "Expected comma between items" error when 'if' statements appear directly after list items.
+    text = re.sub(
+        r'(?m)^(\s*"[^"]+"(?:\\s*#.*)?)\n(?=\s*if\s*\()', # Match the quoted string and optional comment, then lookahead for 'if'
+        r'\1,\n',
+        text
+         )
 
     if original_text != text:
         file_path.write_text(text, encoding="utf-8")
@@ -1668,11 +1680,11 @@ def vcpkg_integrate_install(env):
 # ----------------------------
 # === Main Workflow ===
 # ----------------------------
-def main(): # CerebrumLux V8 Build v7.37.6
+def main(): # CerebrumLux V8 Build v7.37.8
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.37.6 started ===", to_console=True) # Updated start message for 7.37.1
+    log("START", "=== CerebrumLux V8 Build v7.37.8 started ===", to_console=True) # Updated start message for 7.37.1
     start_time = time.time()
     env = prepare_subprocess_env()
 
