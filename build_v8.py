@@ -331,9 +331,7 @@ def write_gclient_file(root_dir, url):
     log("INFO", f".gclient written to: {path} with name 'v8'.")
 
 def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
-    """Internal helper to aggressively patch vs_toolchain.py.
-    This version **prepends** a robust shim block, then REMOVES original function bodies.
-    """
+    """Internal helper to aggressively patch vs_toolchain.py."""
     try:
         if not vs_toolchain_path.exists():
             log("DEBUG", f"'{vs_toolchain_path.name}' not found at {vs_toolchain_path}, cannot patch.", to_console=False)
@@ -477,7 +475,6 @@ def _patch_dotfile_settings_gni(v8_source_dir: str, env: dict) -> bool:
         patched_content = content
         modified = False
 
-        # FIX (v7.30): Use named group for indent.
         match = re.search(r"^(?P<indent>\s*)build_dotfile_settings\s*=\s*\{", patched_content, re.MULTILINE)
         if match:
             indent_level = match.group("indent")
@@ -539,7 +536,7 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
         
         # 2. Neutralize the 'exec_script' call that populates toolchain_data.
         exec_script_pattern = re.compile(
-            r"^(?P<indent>\s*)(?:toolchain_data\s*=\s*)?exec_script\s*\(\s*\"../../vs_toolchain\.py\"[\s\S]*?\)\s*\n",
+            r"^(?P<indent>\s*)(?:toolchain_data\s*=\s*)?exec_script\s*\(\"..\s*/../vs_toolchain\.py\"[\s\S]*?\)\s*\n",
             re.MULTILINE | re.DOTALL
         )
         if exec_script_pattern.search(patched_content):
@@ -690,7 +687,6 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
         "runtime_dirs": (Path(r"{fake_vs_root_for_py.as_posix()}") / "redist").as_posix()
     }}
 """
-            # FIX (v7.30): Replace the entire function definition and body.
             patched_content = pattern_load_toolchain_env.sub(replacement_func_body, patched_content)
             modified = True
             log("INFO", f"Replaced '_LoadToolchainEnv' function body in '{setup_toolchain_path.name}' with full dummy environment (using .as_posix()).", to_console=False)
@@ -765,7 +761,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             re.MULTILINE | re.DOTALL
         )
         if exec_script_vcvars_pattern.search(patched_content):
-            # FIX (v7.34): Escape captured group for safety before using in replacement
+            # FIX (v7.35): Use direct string concatenation to prevent bad escape \g.
             patched_content = exec_script_vcvars_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '\\\\') + "\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'vcvars_toolchain_data' in '{build_gn_path.name}'.", to_console=False)
@@ -794,7 +790,6 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
                 re.MULTILINE
             )
             initial_defined_replace_text = patched_content
-            # Replace defined() call with 'true'.
             patched_content = defined_pattern.sub(r'true', patched_content)
             if initial_defined_replace_text != patched_content:
                 modified = True
@@ -809,9 +804,6 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             )
             initial_access_replace_text = patched_content
 
-            # Construct the replacement string explicitly.
-            # `m.group('pre_assign')` can be None if it's not an assignment, so handle it.
-            # dummy_path is already posix style (forward slashes), so no extra escaping for it.
             def create_replacement_string_for_vcvars(m, current_dummy_path=dummy_path):
                 pre_assign_part = m.group('pre_assign') or ''
                 return pre_assign_part + '"' + current_dummy_path + '"'
@@ -828,6 +820,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             re.MULTILINE | re.DOTALL
         )
         if vcvars_data_object_pattern.search(patched_content):
+            # FIX (v7.35): Use direct string concatenation for clarity and safety.
             patched_content = vcvars_data_object_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized vcvars_toolchain_data object definition\n", patched_content)
             modified = True
             log("INFO", "Neutralized direct 'vcvars_toolchain_data' object definition in 'BUILD.gn' to prevent syntax errors.", to_console=False)
@@ -900,11 +893,11 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
         
         # --- 1. Neutralize the exec_script call for win_toolchain_data ---
         exec_script_win_toolchain_pattern = re.compile(
-            r"^(?P<indent>\s*)win_toolchain_data\s*=\s*exec_script\(\s*\"setup_toolchain\.py\"[\s\S]*?\)\s*\n",
+            r"^(?P<indent>\s*)win_toolchain_data\s*=\s*exec_script\(\"setup_toolchain\.py\"[\s\S]*?\)\s*\n",
             re.MULTILINE | re.DOTALL
         )
         if exec_script_win_toolchain_pattern.search(patched_content):
-            # FIX (v7.34): Escape captured group for safety before using in replacement
+            # FIX (v7.35): Use direct string concatenation to prevent bad escape \g.
             patched_content = exec_script_win_toolchain_pattern.sub(lambda m: m.group('indent') + "# CerebrumLux neutralized: " + m.group(0).strip().replace('\\', '\\\\') + "\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'win_toolchain_data' in '{toolchain_build_gn_path.name}'.", to_console=False)
@@ -943,15 +936,15 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
             insert_point = match_msvc_toolchain.start()
             indent_level = match_msvc_toolchain.group('indent')
 
-            # Check if these lines are already present to avoid duplication
+            new_flags_injection = (
+                f"\n{indent_level}# CerebrumLux injected for MinGW compatibility\n"
+                f"{indent_level}sys_include_flags = []\n"
+                f"{indent_level}sys_lib_flags = []\n"
+            )
+
             if f"{indent_level}sys_include_flags = []" not in patched_content[insert_point:match_msvc_toolchain.end()] and \
                f"{indent_level}sys_lib_flags = []" not in patched_content[insert_point:match_msvc_toolchain.end()]:
                 
-                new_flags_injection = (
-                    f"\n{indent_level}# CerebrumLux injected for MinGW compatibility\n"
-                    f"{indent_level}sys_include_flags = []\n"
-                    f"{indent_level}sys_lib_flags = []\n"
-                )
                 patched_content = patched_content[:insert_point] + new_flags_injection + patched_content[insert_point:]
                 modified = True
                 log("INFO", f"Injected 'sys_include_flags' and 'sys_lib_flags' before 'msvc_toolchain' template in '{toolchain_build_gn_path.name}'.", to_console=False)
@@ -1334,7 +1327,7 @@ def run_gn_gen(env):
         raise RuntimeError("gn binary not found in PATH nor in depot_tools.")
     
     gn_command = [gn_bin, "gen", OUT_DIR]
-    max_attempts = 2
+    max_attempts = 2 # Try once, then once more after potential args.gn patching
     
     for attempt in range(1, max_attempts + 1):
         log("INFO", f"GN gen attempt {attempt}/{max_attempts}.", to_console=True)
