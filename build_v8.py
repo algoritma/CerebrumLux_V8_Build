@@ -542,7 +542,8 @@ def _patch_visual_studio_version_gni(v8_source_dir: str, env: dict) -> bool:
             re.MULTILINE | re.DOTALL
         )
         if exec_script_pattern.search(patched_content):
-            patched_content = exec_script_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip()}\n", patched_content)
+            # FIX (v7.34): Escape captured group for safety before using in replacement
+            patched_content = exec_script_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip().replace('\\', '\\\\')}\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script(\"../../vs_toolchain.py\"...)' call in '{vs_version_gni_path.name}'.", to_console=False)
 
@@ -680,7 +681,7 @@ def _patch_setup_toolchain_py(v8_source_dir: str, env: dict) -> bool:
     Path(r"{fake_vs_root_for_py.as_posix()}/redist").mkdir(parents=True, exist_ok=True)
     
     return {{
-        "vc_bin_dir": (Path(r"{fake_vs_root_for_py.as_posix()}") / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix(), # Corrected path
+        "vc_bin_dir": (Path(r"{fake_vs_root_for_py.as_posix()}") / "VC" / "Tools" / "Bin" / "Hostx64" / "x64").as_posix(),
         "vc_lib_path": (Path(r"{fake_vs_root_for_py.as_posix()}") / "VC" / "lib").as_posix(),
         "vc_include_path": (Path(r"{fake_vs_root_for_py.as_posix()}") / "VC" / "include").as_posix(),
         "sdk_dir": (Path(r"{fake_vs_root_for_py.as_posix()}") / "SDK").as_posix(),
@@ -764,7 +765,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             re.MULTILINE | re.DOTALL
         )
         if exec_script_vcvars_pattern.search(patched_content):
-            # Replace the entire line with a comment to fully neutralize it.
+            # FIX (v7.34): Escape captured group for safety before using in replacement
             patched_content = exec_script_vcvars_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip().replace('\\', '\\\\')}\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'vcvars_toolchain_data' in '{build_gn_path.name}'.", to_console=False)
@@ -800,19 +801,23 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
                 log("INFO", f"Replaced 'defined(vcvars_toolchain_data.{field})' with 'true' in '{build_gn_path.name}'.", to_console=False)
 
         # Then, replace all other accesses/assignments to vcvars_toolchain_data.<field> with dummy paths
-        # FIX (v7.34): Corrected lambda replacement. Explicitly handle 'pre_assign' group and quote dummy_path.
+        # FIX (v7.34): Corrected lambda replacement using explicit string concatenation to prevent bad escape \g.
         for field, dummy_path in dummy_vcvars_paths.items():
             access_pattern = re.compile(
                 r"(?P<pre_assign>\b[a-zA-Z0-9_]+\s*=\s*)?(?P<vcvars_ref>vcvars_toolchain_data\." + re.escape(field) + r")",
                 re.MULTILINE
             )
             initial_access_replace_text = patched_content
-            # Dynamically build replacement string. `m.group('pre_assign')` can be None,
-            # so explicitly handle it or ensure `m.group(1)` is safe if the group exists.
-            patched_content = access_pattern.sub(
-                lambda m: f"{m.group('pre_assign') or ''}\"{dummy_path}\"",
-                patched_content
-            )
+
+            def create_replacement_string_for_vcvars(m, current_dummy_path=dummy_path):
+                pre_assign_part = m.group('pre_assign')
+                if pre_assign_part is None:
+                    pre_assign_part = ''
+                # Construct the string with explicit quoting for GN.
+                return pre_assign_part + '"' + current_dummy_path + '"'
+
+            patched_content = access_pattern.sub(create_replacement_string_for_vcvars, patched_content)
+
             if initial_access_replace_text != patched_content:
                 modified = True
                 log("INFO", f"Replaced all direct accesses/assignments for 'vcvars_toolchain_data.{field}' with hardcoded dummy path in '{build_gn_path.name}'.", to_console=False)
@@ -899,6 +904,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
             re.MULTILINE | re.DOTALL
         )
         if exec_script_win_toolchain_pattern.search(patched_content):
+            # FIX (v7.34): Escape captured group for safety before using in replacement
             patched_content = exec_script_win_toolchain_pattern.sub(lambda m: f"{m.group('indent')}# CerebrumLux neutralized: {m.group(0).strip().replace('\\', '\\\\')}\n", patched_content)
             modified = True
             log("INFO", f"Neutralized 'exec_script' call for 'win_toolchain_data' in '{toolchain_build_gn_path.name}'.", to_console=False)
@@ -994,6 +1000,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
         for pattern_str, replacement_str in tool_definitions_to_patch.items():
             tool_assignment_pattern = re.compile(pattern_str, re.MULTILINE)
             initial_tool_content = patched_content
+            # FIX (v7.30): Use direct string for replacement (no need for lambda for static string).
             patched_content = tool_assignment_pattern.sub(r'  ' + replacement_str + ' # CerebrumLux MinGW tool override', patched_content)
             if initial_tool_content != patched_content:
                 modified = True
@@ -1408,7 +1415,7 @@ def run_gn_gen(env):
                     'vcvars_toolchain_data = {\n'
                     f'  vc_lib_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "lib").as_posix()}"\n'
                     f'  vc_lib_atlmfc_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "atlmfc" / "lib").as_posix()}"\n'
-                    f'  vc_lib_um_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib").as_posix()}"\n' # FIX: Corrected variable name from fake_vs_base_for_gn_obj to fake_vs_base_path_for_gn_obj
+                    f'  vc_lib_um_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "um" / "lib").as_posix()}"\n'
                     f'  vc_lib_ucrt_path = "{(fake_vs_base_path_for_gn_obj / "VC" / "ucrt" / "lib").as_posix()}"\n'
                     '}\n'
                 )
@@ -1554,7 +1561,7 @@ file(COPY ${{V8_HEADERS_TO_COPY}} DESTINATION ${{CURRENT_PACKAGES_DIR}}/include/
 # Handle copyright
 file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/share/${{PORT}}" RENAME copyright)
 """
-    with portfile_path.open("w", encoding="utf-8") as f:
+    with open(portfile_path, "w", encoding="utf-8") as f: # Use Path.open()
         f.write(cmake_content)
     log("INFO", f"Updated {portfile_path}")
 
@@ -1566,7 +1573,7 @@ file(INSTALL "${{SOURCE_PATH}}/LICENSE" DESTINATION "${{CURRENT_PACKAGES_DIR}}/s
         "license": "BSD-3-Clause",
         "supports": "windows & !uwp"
     }
-    with manifest_path.open("w", encoding="utf-8") as f:
+    with open(manifest_path, "w", encoding="utf-8") as f: # Use Path.open()
         json.dump(manifest, f, indent=2)
     log("INFO", f"Created/updated {manifest_path}")
 
