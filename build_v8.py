@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.16 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.17 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -44,7 +44,8 @@ CerebrumLux V8 Build Automation v7.16 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.13): Aggressively patched 'build/config/win/BUILD.gn' to replace direct accesses to 'vcvars_toolchain_data.<field>' with hardcoded dummy paths (using .as_posix()) after neutralizing the exec_script call, resolving "No value named 'vc_lib_path' in scope 'vcvars_toolchain_data'" error. All dummy path injections now consistently use .as_posix(). Updated shim version.
 - FIX (v7.14): Corrected "Invalid token" error in _patch_build_gn when replacing `vcvars_toolchain_data.<field>` by ensuring replacement strings for GN are exact string literals (e.g., `"C:/path"`) without extra backslashes in Python's re.sub method. Updated shim version.
 - FIX (v7.15): Implemented a prioritized patching order in _patch_build_gn to first replace all `defined(vcvars_toolchain_data.<field>)` calls with `true`, then handle direct assignments, resolving the `Bad thing passed to defined()` error. Updated shim version.
-- FIX (v7.16): Corrected `SyntaxError: closing parenthesis ')' does not match opening parenthesis '['` in `main()` function's `git reset` command.
+- FIX (v7.16): Corrected `SyntaxError: closing parenthesis ')' does not match opening parenthesis '['` in `main()` function's `git reset` command. Updated shim version.
+- FIX (v7.17): Removed `/* ... */` style comments from `defined()` bypasses within `_patch_build_gn` function to comply with GN's strict `#` comment syntax, resolving `Invalid token` error. Updated shim version.
 """
 import os
 import sys
@@ -326,7 +327,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         # FIX (v7.1): Changed wdk_path, sdk_path, and DetectVisualStudioPath to non-empty dummy paths.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.15) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.16) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -361,7 +362,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         )
 
         # Check for the *current* shim version. If it's not present, or if an older version is, apply.
-        if f"# --- CerebrumLux injected shim START (v7.15) ---" not in text: 
+        if f"# --- CerebrumLux injected shim START (v7.16) ---" not in text: 
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -427,8 +428,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             # Re-verify if the shim is still correct in case no 'modified' flag was set (e.g., if re-running)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.15) ---" not in current_content:
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.15) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.16) ---" not in current_content:
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.16) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -442,7 +443,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 return False
             # Also explicitly check the dummy paths within the shim for consistency (v7.1 check)
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.15 content missing).", to_console=False)
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.16 content missing).", to_console=False)
                  return False
             
             return True
@@ -808,7 +809,8 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             # Replace the entire defined() call with 'true'. Keep the surrounding 'if (...) {'.
             # GN's 'defined' only checks if a variable exists. If we are bypassing the VS toolchain,
             # we want these checks to succeed, effectively indicating the "paths" are present.
-            patched_content = defined_pattern.sub(r'\g<prefix>true /* CerebrumLux MinGW defined bypass for ' + field + r' */ \g<suffix>', patched_content)
+            # FIX (v7.17): Removed the C-style comment from the replacement string.
+            patched_content = defined_pattern.sub(r'\g<prefix>true\g<suffix>', patched_content)
             if initial_defined_replace_text != patched_content:
                 modified = True
                 log("INFO", f"Replaced 'defined(vcvars_toolchain_data.{field})' with 'true' in '{build_gn_path.name}'.", to_console=False)
@@ -1140,7 +1142,7 @@ def run_gn_gen(env):
                 "No value named \"runtime_dirs\" in scope \"vcvars_toolchain_data\"" in error_output or
                 "May only use \".\" for identifiers." in error_output or
                 "Invalid token." in error_output or
-                "Bad thing passed to defined()." in error_output): # Also check for the specific GN syntax error (defined())
+                "Bad thing passed to defined()." in error_output): 
                 
                 log("INFO", "Detected missing 'vcvars_toolchain_data' variables or GN syntax error in GN output. Attempting to patch args.gn.", to_console=True)
                 
@@ -1282,7 +1284,7 @@ def update_vcpkg_port(version, ref, homepage, license):
     manifest_path = os.path.join(port_v8_dir, "vcpkg.json")
 
     cmake_content = f"""
-# Auto-generated by CerebrumLux V8 Builder v7.15
+# Auto-generated by CerebrumLux V8 Builder v7.17
 # This portfile directly uses the pre-built V8 library and headers
 # generated by the custom Python script.
 # It skips the standard vcpkg build process for V8 for MinGW compatibility.
@@ -1346,7 +1348,7 @@ def vcpkg_integrate_install(env):
 # === Main Workflow ===
 # ----------------------------
 def main():
-    log("START", "=== CerebrumLux V8 Build v7.15 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.17 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
@@ -1387,7 +1389,7 @@ def main():
 
         log("STEP", f"Checking out specific V8 reference ({V8_REF}) in {V8_SRC}.")
         run(["git", "checkout", V8_REF], cwd=V8_SRC, env=env)
-        run(["git", "reset", "--hard", V8_REF], cwd=V8_SRC, env=env) # FIXED PARENTHESIS HERE
+        run(["git", "reset", "--hard", V8_REF], cwd=V8_SRC, env=env)
         log("INFO", f"Checked out V8 ref {V8_REF}.")
 
         log("STEP", "Patching V8 DEPS file and build configuration files for MinGW compatibility.")
