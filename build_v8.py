@@ -802,6 +802,9 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             )
             initial_access_replace_text = patched_content
 
+            # Construct the replacement string explicitly.
+            # `m.group('pre_assign')` can be None if it's not an assignment, so handle it.
+            # dummy_path is already posix style (forward slashes), so no extra escaping for it.
             def create_replacement_string_for_vcvars(m, current_dummy_path=dummy_path):
                 pre_assign_part = m.group('pre_assign') or ''
                 return pre_assign_part + '"' + current_dummy_path + '"'
