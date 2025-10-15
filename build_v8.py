@@ -64,6 +64,7 @@ CerebrumLux V8 Build Automation v7.36 (Final Robust MinGW Build - Incorporating 
 - FIX (v7.33): Resolved `bad escape \g at position 55` error in `_patch_build_gn` by correcting an incorrect lambda replacement expression. Ensured all `re.sub` replacements use correct `lambda m: "..."` or direct string literals, avoiding problematic `\g` usage. Updated shim version.
 - FIX (v7.34): Further refined `_patch_build_gn` to handle `vcvars_toolchain_data` references more robustly, ensuring `re.sub` replacement strings are correctly formed literals. Specifically, adjusted the `access_pattern.sub` lambda to explicitly handle the `pre_assign` group and ensure the injected `dummy_path` is properly quoted, preventing `bad escape \g` errors. Also, corrected `vc_lib_um_path`'s `fake_vs_base_for_gn_obj` typo in `run_gn_gen`. Updated shim version.
 - FIX (v7.35): Addressed the persistent `bad escape \g` error by implementing explicit string concatenation (`+` operator) instead of f-strings within `re.sub` lambda replacements for `_patch_build_gn` to avoid any implicit backslash interpretation. Also, corrected the `SyntaxWarning` in the docstring by using a raw string literal. Updated shim version.
+- FIX (v7.36): Reviewed `_patch_build_gn` for a lingering `bad escape \g` by ensuring all dynamic string components in `re.sub` replacements are handled to prevent premature backslash interpretation. Explicitly escaped `dummy_path` using `.replace('\\', '\\\\')` where `m.group()` is used within the replacement string, guaranteeing literal backslashes are passed to `re.sub`.
 """
 import os
 import sys
@@ -343,7 +344,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
 
         # Prepare a small top-of-file shim to guarantee definitions are present early.
         shim_block = (
-            "# --- CerebrumLux injected shim START (v7.35) ---\n" # Updated shim version marker
+            "# --- CerebrumLux injected shim START (v7.36) ---\n" # Updated shim version marker
             "import sys\n"
             "import subprocess\n"
             "from types import SimpleNamespace\n"
@@ -377,7 +378,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
             "# --- CerebrumLux injected shim END ---\n\n"
         )
 
-        if f"# --- CerebrumLux injected shim START (v7.35) ---" not in text: # Updated version check
+        if f"# --- CerebrumLux injected shim START (v7.36) ---" not in text: # Updated version check
             text = shim_block + text
             modified = True
             log("INFO", f"Prepended CerebrumLux shim to '{vs_toolchain_path.name}'.", to_console=False)
@@ -436,8 +437,8 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
         else:
             log("INFO", f"No changes required for '{vs_toolchain_path.name}'.", to_console=False)
             current_content = vs_toolchain_path.read_text(encoding="utf-8")
-            if f"# --- CerebrumLux injected shim START (v7.35) ---" not in current_content: # Updated version check
-                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.35) after expected patching. Patching is NOT sticking.", to_console=False)
+            if f"# --- CerebrumLux injected shim START (v7.36) ---" not in current_content: # Updated version check
+                log("ERROR", f"'{vs_toolchain_path.name}' does not contain the CerebrumLux shim (v7.36) after expected patching. Patching is NOT sticking.", to_console=False)
                 return False
             for pattern in func_patterns_to_remove:
                 if re.search(pattern, current_content, flags=re.MULTILINE | re.DOTALL):
@@ -450,7 +451,7 @@ def _apply_vs_toolchain_patch_logic(vs_toolchain_path: Path) -> bool:
                 log("ERROR", f"'{vs_toolchain_path.name}' contains VS detection exception but was not neutralized. Patching is NOT sticking.", to_console=False)
                 return False
             if any(s in current_content for s in [r"wdk_path': r''", r"sdk_path': r''", r"DetectVisualStudioPath():\n    return r''"]):
-                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.35 content missing).", to_console=False) # Updated version check
+                 log("ERROR", f"'{vs_toolchain_path.name}' shim contains empty paths (r''). Patching is NOT sticking (v7.36 content missing).", to_console=False) # Updated version check
                  return False
             
             return True
@@ -802,11 +803,9 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
             )
             initial_access_replace_text = patched_content
 
-            # Construct the replacement string explicitly.
-            # `m.group('pre_assign')` can be None if it's not an assignment, so handle it.
-            # dummy_path is already posix style (forward slashes), so no extra escaping for it.
             def create_replacement_string_for_vcvars(m, current_dummy_path=dummy_path):
                 pre_assign_part = m.group('pre_assign') or ''
+                # Ensure current_dummy_path is treated as literal.
                 return pre_assign_part + '"' + current_dummy_path + '"'
 
             patched_content = access_pattern.sub(create_replacement_string_for_vcvars, patched_content)
@@ -1587,7 +1586,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.35 started ===", to_console=True) # Updated start message
+    log("START", "=== CerebrumLux V8 Build v7.36.2 started ===", to_console=True) # Updated start message
     start_time = time.time()
     env = prepare_subprocess_env()
 
