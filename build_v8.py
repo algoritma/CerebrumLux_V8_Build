@@ -799,7 +799,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
     """
     Patches V8_SRC/build/toolchain/win/BUILD.gn to neutralize the 'exec_script' call
     that populates win_toolchain_data, ensures tool definitions are set for MinGW,
-    and reliably injects sys_lib_flags/sys_include_flags at the end of the file.
+    and directly replaces sys_lib_flags/sys_include_flags assignments with empty lists.
     The win_toolchain_data object itself will be injected via args.gn.
     """
     toolchain_build_gn_path = Path(v8_source_dir) / "build" / "toolchain" / "win" / "BUILD.gn"
@@ -807,7 +807,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
         log("WARN", f"'{toolchain_build_gn_path.name}' not found at {toolchain_build_gn_path}. Skipping patch.", to_console=True)
         return False
 
-    log("INFO", f"Patching '{toolchain_build_gn_path.name}' to neutralize 'exec_script', handle tool definitions/flags, and inject sys_flags. win_toolchain_data via args.gn.", to_console=True)
+    log("INFO", f"Patching '{toolchain_build_gn_path.name}' to neutralize 'exec_script', handle tool definitions/flags, and directly replace sys_flags. win_toolchain_data via args.gn.", to_console=True)
     try:
         content = toolchain_build_gn_path.read_text(encoding="utf-8")
         patched_content = content
@@ -846,39 +846,37 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
             modified = True
             log("INFO", f"Removed old injected 'win_toolchain_data' definition from '{toolchain_build_gn_path.name}'.", to_console=False)
 
-        # --- 3. Comment out existing assignments for sys_include_flags and sys_lib_flags ---
-        flags_assignment_pattern = re.compile(
-            r"^(?P<indent>\s*)(sys_include_flags|sys_lib_flags)\s*=\s*.*$",
-            re.MULTILINE
-        )
-        initial_flags_content_before_comment = patched_content
-        # Replace matches with commented-out versions, preserving indentation
-        patched_content = flags_assignment_pattern.sub(r'\g<indent># CerebrumLux neutralized: \g<0>', patched_content)
-        if initial_flags_content_before_comment != patched_content:
-            modified = True
-            log("INFO", "Commented out existing assignments for 'sys_include_flags' and 'sys_lib_flags' in 'BUILD.gn'.", to_console=False)
+        # --- 3. Directly replace existing assignments for sys_include_flags and sys_lib_flags with empty lists ---
+        flags_to_replace = {
+            "sys_include_flags": "sys_include_flags = [] # CerebrumLux MinGW patch",
+            "sys_lib_flags": "sys_lib_flags = [] # CerebrumLux MinGW patch",
+        }
 
-        # --- 4. Ensure sys_include_flags and sys_lib_flags are defined as empty lists at the very end of the file ---
-        new_flags_injection = ""
-        
-        # Check if already present to avoid duplicates, or if commented out but not replaced
-        if not re.search(r"sys_include_flags\s*=\s*\[\]\s*# CerebrumLux injected", patched_content) and \
-           not re.search(r"^\s*# CerebrumLux neutralized:.*sys_include_flags\s*=.*", patched_content, re.MULTILINE):
-            new_flags_injection += "\n\nsys_include_flags = [] # CerebrumLux injected for MinGW compatibility\n"
-            log("INFO", "Preparing to inject 'sys_include_flags = []' at the end of 'BUILD.gn'.", to_console=False)
-        
-        if not re.search(r"sys_lib_flags\s*=\s*\[\]\s*# CerebrumLux injected", patched_content) and \
-           not re.search(r"^\s*# CerebrumLux neutralized:.*sys_lib_flags\s*=.*", patched_content, re.MULTILINE):
-            new_flags_injection += "sys_lib_flags = [] # CerebrumLux injected for MinGW compatibility\n"
-            log("INFO", "Preparing to inject 'sys_lib_flags = []' at the end of 'BUILD.gn'.", to_console=False)
+        for flag_name, replacement_str in flags_to_replace.items():
+            # Pattern to match the entire line containing the assignment, preserving leading whitespace.
+            assignment_pattern = re.compile(
+                r"^(?P<indent>\s*)" + re.escape(flag_name) + r"\s*=\s*.*$",
+                re.MULTILINE
+            )
+            initial_content_for_flag = patched_content
+            # Replace all occurrences of the assignment with the desired empty list.
+            patched_content = assignment_pattern.sub(r'\g<indent>' + replacement_str, patched_content)
+            if initial_content_for_flag != patched_content:
+                modified = True
+                log("INFO", f"Replaced existing assignment for '{flag_name}' with empty list in 'BUILD.gn'.", to_console=False)
+            
+            # Fallback: If the flag was not found as an assignment or couldn't be replaced, ensure it's defined at the very end.
+            if not re.search(r"^\s*" + re.escape(flag_name) + r"\s*=\s*\[\]\s*# CerebrumLux MinGW patch", patched_content, re.MULTILINE):
+                append_flag_line = f"\n{flag_name} = [] # CerebrumLux injected for MinGW compatibility\n"
+                # Avoid simple 'in patched_content' check for appending, as it might duplicate if a commented line exists
+                # Instead, check if the *exact desired line with comment* is present.
+                if not f"{flag_name} = [] # CerebrumLux injected for MinGW compatibility" in patched_content:
+                    patched_content = patched_content.rstrip() + "\n" + append_flag_line.strip() + "\n"
+                    modified = True
+                    log("INFO", f"Injected '{flag_name} = []' at the end of 'BUILD.gn' as a fallback.", to_console=False)
 
-        if new_flags_injection:
-            # Append to the end of the file content, ensuring proper newlines.
-            patched_content = patched_content.rstrip() + "\n" + new_flags_injection.strip() + "\n"
-            modified = True
-            log("INFO", "Injected 'sys_include_flags' and 'sys_lib_flags' as empty lists at the end of 'BUILD.gn'.", to_console=False)
 
-        # --- 5. Replace MSVC tool definitions with MinGW tools (as direct strings) ---
+        # --- 4. Replace MSVC tool definitions with MinGW tools (as direct strings) ---
         mingw_bin_posix = Path(MINGW_BIN).as_posix()
         
         tool_definitions_to_patch = {
@@ -896,7 +894,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
                 modified = True
                 log("INFO", f"Replaced tool assignment (pattern: {pattern_str[:min(len(pattern_str), 50)]}...) with MinGW path in '{toolchain_build_gn_path.name}'.", to_console=False)
         
-        # --- 6. Generic replacement for any unhandled win_toolchain_data.<field> access ---
+        # --- 5. Generic replacement for any unhandled win_toolchain_data.<field> access ---
         for field, dummy_path in dummy_win_toolchain_paths.items():
             generic_access_pattern = re.compile(r"win_toolchain_data\." + re.escape(field), re.MULTILINE)
             initial_generic_replace_text = patched_content
@@ -1481,7 +1479,7 @@ def main():
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.25 started ===", to_console=True)
+    log("START", "=== CerebrumLux V8 Build v7.26 started ===", to_console=True)
     start_time = time.time()
     env = prepare_subprocess_env()
 
