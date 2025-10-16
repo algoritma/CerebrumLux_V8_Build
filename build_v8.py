@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 CerebrumLux V8 Build Automation v7.37.19 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
@@ -1007,25 +1007,28 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
         # FIX (v7.37.14): Handle 'May only subscript identifiers' error.
         # This replaces `toolchain_arch = _invoker_local.toolchain_arch` with a temporary variable.
         invoker_patch_needed = False
-        if re.search(r'invoker\.toolchain_arch', patched_content) and '_invoker_local = invoker' not in patched_content:
+        # FIX (v7.37.19): Robustly apply temporary variable assignment for toolchain_arch.
+        # This ensures that `toolchain_arch = (invoker|_invoker_local).toolchain_arch` is correctly transformed.
+        # It now accounts for both original 'invoker' and already patched '_invoker_local'.
+        
+        # Check if 'invoker.toolchain_arch' is present and '_invoker_local = invoker' is not yet injected
+        if re.search(r'(?:invoker|_invoker_local)\.toolchain_arch', patched_content) and '_invoker_local = invoker' not in patched_content:
             invoker_patch_needed = True
             template_start_pattern = re.compile(r"^(?P<indent_tmpl>\s*)template\s*\(\s*\"msvc_toolchain\"\s*\)\s*\{", re.MULTILINE)
             match_template = template_start_pattern.search(patched_content)
             if match_template:
                 insert_point = match_template.end()
                 indent_level_tmpl = match_template.group('indent_tmpl')
-                invoker_injection_text = f"\n{indent_level_tmpl}  # CerebrumLux: Workaround for GN \"May only subscript identifiers\"\n{indent_level_tmpl}  _invoker_local = invoker\n"
+                # FIX (v7.37.19): Corrected docstring escape.
+                invoker_injection_text = f"\n{indent_level_tmpl}  # CerebrumLux: Workaround for GN \\\"May only subscript identifiers\\\"\n{indent_level_tmpl}  _invoker_local = invoker\n"
                 patched_content = patched_content[:insert_point] + invoker_injection_text + patched_content[insert_point:]
                 modified = True
                 log("INFO", "Injected '_invoker_local = invoker' into 'msvc_toolchain' template.", to_console=False)
 
         if invoker_patch_needed:
             initial_replace_content = patched_content
-            
+           
             # FIX (v7.37.19): Robustly apply temporary variable assignment for toolchain_arch.
-            # This ensures that `toolchain_arch = (invoker|_invoker_local).toolchain_arch` is correctly transformed.
-            # It now accounts for both original 'invoker' and already patched '_invoker_local'.
-            
             # Look for the target line: 'toolchain_arch = X.toolchain_arch' where X can be 'invoker' or '_invoker_local'
             # We explicitly replace the *entire line* with the two-step assignment.
             toolchain_arch_assignment_pattern = re.compile(
@@ -1061,7 +1064,7 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
                 modified = True # Update modified flag
                 log("INFO", f"Applied 'May only subscript identifiers' fix in '{toolchain_build_gn_path.name}'.", to_console=False)
             else:
-                log("INFO", f"No additional 'invoker.toolchain_arch' references found for replacement after primary fix in '{toolchain_build_gn_path.name}'.", to_console=False)
+                log("INFO", f"No further 'invoker.toolchain_arch' references found for replacement after primary fix in '{toolchain_build_gn_path.name}'.", to_console=False)
 
         # --- 1. Neutralize the exec_script call for win_toolchain_data ---
         exec_script_win_toolchain_pattern = re.compile(
@@ -1233,45 +1236,49 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
 
 def normalize_gn_lists(file_path: Path):
     """
-    Ensures correct GN list syntax, specifically adding missing commas between
-    string elements and after string elements that are followed by comments.
-    This prevents "Expected comma between items" errors.
-    # FIX (v7.37.8): Reinstated the 'if' comma handling as it proved to be essential. This docstring is correct.
+    Normalizes GN list syntax by:
+      - removing stray lines that only contain commas,
+      - removing trailing commas immediately before a closing ']' or '}' (which cause GN parse errors),
+      - preserving other spacing.
+    Returns True if file was modified.
     """
-    log("INFO", f"Normalizing GN list syntax in {file_path.name} to add missing commas.", to_console=False)
-    text = file_path.read_text(encoding="utf-8")
-    original_text = text
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        original = content
 
-    # 1. Add comma between a quoted string and a subsequent quoted string on a new line
-    # Example: "item1"\n"item2"  -> "item1",\n"item2"
-    text = re.sub(
-        r'(?m)^(\s*"[^"]+")\n(?=\s*"[^"]+")',
-        r'\1,\n',
-        text
-    )
+        # 1) Remove lines that are only a comma (leftovers from prior aggressive line deletions)
+        #    Example problematic sequence that could be left behind:
+        #      "..., \n    ,\n  ],"
+        content = re.sub(r"(?m)^[ \t]*,[ \t]*\r?\n", "", content)
 
-    # 2. Add comma between a quoted string ending with a comment and a subsequent quoted string on a new line
-    # Example: "item1" # comment\n"item2" -> "item1", # comment\n"item2"
-    text = re.sub(
-        r'(?m)^(\s*"[^"]+"\s*#.*)\n(?=\s*"[^"]+")',
-        r'\1,\n',
-        text
-    )
+        # 2) Remove a trailing comma that sits immediately before a closing bracket or brace.
+        #    This pattern fixes cases like:
+        #      "  elem,\n]"
+        #    -> becomes:
+        #      "  elem\n]"
+        content = re.sub(r",\s*(\r?\n)([ \t]*[\]\}])", r"\1\2", content)
 
-    # FIX (v7.37.8): This pattern was removed in v7.37.7 but is CRITICAL for 'if' statements within GN lists. Re-adding.
-    text = re.sub(
-        r'(?m)^(\s*"[^"]+"(?:\\s*#.*)?)\n(?=\s*if\s*\()', # Match quoted string + optional comment, lookahead for 'if'
-        r'\1,\n', # Add comma before the 'if' line
-        text
-        )
+        # 3) Also collapse sequences where a comma remains directly before closing on the same line:
+        #    Example: "elem,]" -> "elem]"
+        content = re.sub(r",([ \t]*[\]\}])", r"\1", content)
 
-    if original_text != text:
-        file_path.write_text(text, encoding="utf-8")
-        log("INFO", f"GN list syntax normalized in {file_path.name} successfully.", to_console=False)
-        return True
-    else:
-        log("INFO", f"No GN list syntax normalization needed for {file_path.name}.", to_console=False)
+        if content != original:
+            # backup original before overwriting (safety)
+            backup = file_path.with_suffix(file_path.suffix + ".cerebrumlux.bak")
+            try:
+                if not backup.exists():
+                    backup.write_text(original, encoding="utf-8")
+            except Exception:
+                # Non-fatal if backup fails; still attempt to write modified file
+                pass
+            file_path.write_text(content, encoding="utf-8")
+            log("INFO", f"Normalized GN lists and cleaned trailing commas in '{file_path.name}'", to_console=True)
+            return True
         return False
+    except Exception as e:
+        log("ERROR", f"normalize_gn_lists failed: {e}", to_console=True)
+        return False
+
     
 def patch_v8_deps_for_mingw(v8_source_dir: str, env: dict):
     """
@@ -1500,11 +1507,42 @@ def _find_tool(names: list) -> str:
             return path
     
     for n in names:
-        p = Path(DEPOT_TOOLS) / n # Use Path
+        p = Path(DEPOT_TOOLS) / n
         if p.exists():
             log("DEBUG", f"Found tool '{n}' in DEPOT_TOOLS: {p}", to_console=False)
-            return str(p) # Return as string for subprocess
-    
+            return str(p)
+
+    # Fallback logic specifically for 'gn'
+    if "gn" in names or "gn.exe" in names:
+        log("INFO", "Standard GN search failed. Trying fallback methods...")
+        # Fallback 1: Check inside the V8 source buildtools path
+        v8_src = Path(V8_SRC)
+        for alt in [
+            v8_src / "buildtools" / "win" / "gn.exe",
+            v8_src / "buildtools" / "gn.exe",
+            v8_src / "buildtools" / "gn",
+        ]:
+            if alt.exists():
+                log("INFO", f"Found fallback GN binary at {alt}")
+                return str(alt)
+        
+        # Fallback 2: Try to bootstrap GN if depot_tools has the script
+        depot = Path(DEPOT_TOOLS)
+        bootstrap_script = depot / "bootstrap-gn.py" # Common name for this script
+        if not bootstrap_script.exists():
+             bootstrap_script = depot / "bootstrap" / "bootstrap.py" # Alternative path
+
+        if bootstrap_script.exists():
+            try:
+                log("INFO", f"Attempting to bootstrap GN via {bootstrap_script}...")
+                run([sys.executable, str(bootstrap_script)], cwd=depot, check=True)
+                gn_path = depot / "gn.exe"
+                if gn_path.exists():
+                    log("INFO", f"Bootstrapped GN successfully at {gn_path}")
+                    return str(gn_path)
+            except Exception as e:
+                log("WARN", f"GN bootstrap attempt failed: {e}")
+
     log("ERROR", f"Tool not found among candidates: {names}", to_console=False)
     return None
 
@@ -1549,9 +1587,34 @@ def write_args_gn(out_dir):
     log("INFO", f"args.gn written to {p}")
 
 def run_gn_gen(env):
-    """Generates Ninja build files using GN."""
-    gn_bin = _find_tool(["gn", "gn.exe"])
-    if not gn_bin:
+    gn_tool = _find_tool("gn")
+    # Backup critical GN files before generation for easier debugging if GN fails
+    for rel in ["build/config/win/BUILD.gn", "build/toolchain/win/BUILD.gn"]:
+        p = Path(V8_SRC) / rel
+        if p.exists():
+            try:
+                backup_name = f"{p.name}.pre-gn-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+                backup_path = Path(LOG_DIR) / backup_name
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                backup_path.write_text(p.read_text(encoding='utf-8'), encoding='utf-8')
+                log("DEBUG", f"Backed up '{p}' -> '{backup_path}'", to_console=False)
+            except Exception as e:
+                log("WARN", f"Could not backup {p}: {e}", to_console=True)
+
+    try:
+        run([str(gn_tool), "gen", OUT_DIR], cwd=V8_SRC, env=env, check=True)
+    except Exception as e:
+        # On GN failure, capture the current BUILD.gn contents for debugging.
+        ts = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+        for rel in ["build/config/win/BUILD.gn", "build/toolchain/win/BUILD.gn"]:
+            p = Path(V8_SRC) / rel
+            if p.exists():
+                try:
+                    err_dump = Path(LOG_DIR) / f"{p.name}.gnfail.{ts}.txt"
+                    err_dump.write_text(p.read_text(encoding='utf-8'), encoding='utf-8')
+                    log("ERROR", f"Saved failing GN file to '{err_dump}' for inspection.", to_console=True)
+                except Exception as e2:
+                    log("WARN", f"Failed to save failing GN file {p}: {e2}", to_console=True)
         raise RuntimeError("gn binary not found in PATH nor in depot_tools.")
     
     gn_command = [gn_bin, "gen", OUT_DIR]
@@ -1808,8 +1871,166 @@ def vcpkg_integrate_install(env):
     log("INFO", "'vcpkg integrate install' completed.")
 
 # ----------------------------
+# === Python Dependency Management ===
+# ----------------------------
+def _install_python_dependencies(env):
+    """
+    Installs required Python packages for depot_tools.
+    """
+    log("STEP", "Installing Python dependencies for depot_tools (httplib2, setuptools, PySocks).", to_console=True)
+    try:
+        # Ensure pip and setuptools are up to date
+        run([sys.executable, "-m", "pip", "install", "--upgrade", "pip", "setuptools"], env=env)
+        # Install required httplib2 module
+        run([sys.executable, "-m", "pip", "install", "httplib2"], env=env)
+        # YENİ EKLENTİ: httplib2.socks hatasını gidermek için PySocks'ı yükle
+        run([sys.executable, "-m", "pip", "install", "PySocks"], env=env)
+        log("INFO", "Python dependencies installed successfully.", to_console=True)
+        return True
+    except Exception as e:
+        log("FATAL", f"Failed to install Python dependencies: {e}", to_console=True)
+        return False
+
+# ----------------------------
+# === Depot Tools Patching ===
+# ----------------------------
+def _patch_gerrit_util_py(depot_tools_dir: str, env: dict) -> bool:
+    """
+    Patches C:\depot_tools\gerrit_util.py to resolve 'ModuleNotFoundError: No module named 'httplib2.socks''.
+    This involves modifying the import statement for httplib2.socks to use PySocks.
+    """
+    gerrit_util_path = Path(depot_tools_dir) / "gerrit_util.py"
+    if not gerrit_util_path.exists():
+        log("WARN", f"'{gerrit_util_path.name}' not found at {gerrit_util_path}. Skipping patch.", to_console=True)
+        return False
+
+    log("INFO", f"Patching '{gerrit_util_path.name}' to resolve 'httplib2.socks' import error.", to_console=True)
+    try:
+        content = gerrit_util_path.read_text(encoding="utf-8")
+        patched_content = content
+        modified = False
+
+        # Pattern to find 'import httplib2.socks'
+        # Captures leading indentation and any trailing comments/aliases
+        import_pattern = re.compile(r"^(?P<indent>\s*)import\s+httplib2\.socks(?P<rest>.*)$", re.MULTILINE)
+
+        if import_pattern.search(patched_content):
+            # The replacement makes it try the original, and if that fails, try 'socks' and alias it.
+            # It preserves the original indentation and any additional import parts (like 'as X').
+            replacement_block = r"""\g<indent>try:
+\g<indent>    import httplib2.socks\g<rest>
+\g<indent>except ImportError:
+\g<indent>    # CerebrumLux MinGW patch: httplib2.socks not found, use PySocks instead.
+\g<indent>    import socks as httplib2_socks_module
+\g<indent>    import sys
+\g<indent>    sys.modules['httplib2.socks'] = httplib2_socks_module
+"""
+            patched_content = import_pattern.sub(replacement_block, patched_content)
+            modified = True
+            log("INFO", f"Patched 'import httplib2.socks' in '{gerrit_util_path.name}'.", to_console=False)
+        else:
+            # Check if the patch is already present to avoid redundant operations and false "no changes"
+            if "import socks as httplib2_socks_module" in patched_content and "sys.modules['httplib2.socks'] = httplib2_socks_module" in patched_content:
+                log("INFO", f"Patch for 'httplib2.socks' already present in '{gerrit_util_path.name}'.", to_console=False)
+                return True # Already patched
+
+            log("INFO", f"'import httplib2.socks' not found or already patched in '{gerrit_util_path.name}'. Skipping.", to_console=False)
+            return False # Not found and not already patched
+
+        if modified:
+            try:
+                bak_path = gerrit_util_path.with_suffix(gerrit_util_path.suffix + ".cerebrumlux.bak")
+                if not bak_path.exists(): # Create backup only if it doesn't exist
+                    bak_path.write_bytes(content.encode("utf-8", errors="replace"))
+                    log("DEBUG", f"Created backup of original '{gerrit_util_path.name}' at '{bak_path.name}'.", to_console=False)
+            except Exception as e:
+                log("WARN", f"Could not write backup of '{gerrit_util_path.name}': {e}", to_console=False)
+
+            gerrit_util_path.write_text(patched_content, encoding="utf-8")
+            log("INFO", f"'{gerrit_util_path.name}' patched successfully.", to_console=True)
+            # Staging changes to prevent gclient sync -D from reverting them
+            run(["git", "add", str(gerrit_util_path)], cwd=depot_tools_dir, env=env, check=False)
+            log("INFO", f"Staged '{gerrit_util_path.name}' changes with 'git add'.", to_console=True)
+            return True
+        else:
+            log("INFO", f"'{gerrit_util_path.name}' already patched or no changes needed.", to_console=False)
+            # Ensure it's staged even if no new changes, in case it was modified externally or by a previous failed attempt
+            run(["git", "add", str(gerrit_util_path)], cwd=depot_tools_dir, env=env, check=False)
+            log("INFO", f"Ensured '{gerrit_util_path.name}' is staged with 'git add'.", to_console=True)
+            return True
+
+    except Exception as e:
+        log("ERROR", f"Failed to patch '{gerrit_util_path.name}': {e}", to_console=True)
+        return False
+
+# ----------------------------
 # === Main Workflow ===
 # ----------------------------
+def _check_system_prerequisites():
+    """Checks for required tools like git, python, etc."""
+    required_tools = ["git", "python"]
+    missing = []
+    for tool in required_tools:
+        if shutil.which(tool) is None:
+            missing.append(tool)
+    if missing:
+        for tool in missing:
+            if tool == "git":
+                log("WARN", "Git not found in PATH. Attempting to bootstrap Git inside depot_tools...")
+                depot = Path("C:/depot_tools")
+                git_bat = depot / "git.bat"
+                if not git_bat.exists():
+                    try:
+                        run(["python", str(depot / "bootstrap" / "bootstrap.py")], cwd=depot, check=False)
+                    except Exception as e:
+                        log("WARN", f"Git bootstrap failed: {e}")
+            else:
+                log("FATAL", f"Missing required tool: {tool}")
+                sys.exit(1)
+
+    # --- CerebrumLux Auto Python Fix ---
+    # Detect and avoid Microsoft Store Python
+    import platform
+    py_exec = sys.executable
+    if "WindowsApps" in py_exec or "PythonSoftwareFoundation" in py_exec:
+        log("WARN", f"Detected Microsoft Store Python: {py_exec}")
+
+        # Try known local Python paths
+        possible_pythons = [
+            Path("C:/Program Files/Python312/python.exe"),
+            Path("C:/Program Files/Python311/python.exe"),
+            Path("C:/Python312/python.exe"),
+            Path("C:/Python311/python.exe"),
+            Path(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Python312", "python.exe"),
+        ]
+
+        fallback = None
+        for p in possible_pythons:
+            if p.exists():
+                fallback = p
+                break
+
+        if fallback:
+            log("INFO", f"Switching to system Python: {fallback}")
+            os.environ["PYTHON_EXECUTABLE"] = str(fallback)
+            sys.executable = str(fallback)
+        else:
+            log("ERROR", "No system Python found. Store Python cannot run gclient. "
+                         "Please install a standalone Python (from python.org).")
+            time.sleep(2)
+
+    # --- Ensure git works under current Python environment ---
+    git_path = shutil.which("git")
+    if not git_path:
+        depot_git = Path(os.environ.get("DEPOT_TOOLS", r"C:\depot_tools")) / "git.bat"
+        if depot_git.exists():
+            os.environ["PATH"] = str(depot_git.parent) + os.pathsep + os.environ["PATH"]
+            log("INFO", f"Using git fallback from depot_tools: {depot_git}")
+        else:
+            log("FATAL", "No git found (not in PATH or depot_tools). Cannot continue.")
+            sys.exit(2)
+
+
 def main(): # CerebrumLux V8 Build v7.37.19
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -1817,6 +2038,8 @@ def main(): # CerebrumLux V8 Build v7.37.19
     log("START", "=== CerebrumLux V8 Build v7.37.19 started ===", to_console=True) # Updated start message for 7.37.14
     start_time = time.time()
     env = prepare_subprocess_env()
+
+
 
     try:
         if Path(V8_ROOT).is_dir():
@@ -1830,6 +2053,19 @@ def main(): # CerebrumLux V8 Build v7.37.19
 
         log("STEP", "Ensuring depot_tools is cloned and functional.")
         ensure_depot_tools(env)
+        
+        # --- Python Bağımlılıklarını Yükle ---
+        if not _install_python_dependencies(env):
+            sys.exit(1)
+        # --- Python Bağımlılıkları Son ---
+
+        # --- YENİ ADIM: gerrit_util.py'yi httplib2.socks uyumluluğu için yamala ---
+        log("STEP", "Patching gerrit_util.py for httplib2.socks compatibility.")
+        if not _patch_gerrit_util_py(DEPOT_TOOLS, env):
+            log("FATAL", "Failed to patch gerrit_util.py. Aborting.", to_console=True)
+            sys.exit(1)
+        # --- YENİ ADIM SONU ---
+        # --- YENİ ADIM SONU ---
         
         log("STEP", "Writing .gclient file in V8_ROOT for V8 repository configuration.")
         write_gclient_file(V8_ROOT, V8_GIT_URL)
