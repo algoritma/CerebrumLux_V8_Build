@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CerebrumLux V8 Build Automation v7.37.18 (Final Robust MinGW Build - Incorporating all feedback)
+CerebrumLux V8 Build Automation v7.37.19 (Final Robust MinGW Build - Incorporating all feedback)
 - Auto-resume (incremental fetch + gclient sync)
 - Proxy fallback & git/http tuning for flaky networks
 -  MinGW toolchain usage (DEPOT_TOOLS_WIN_TOOLCHAIN=0)
@@ -83,6 +83,7 @@ CerebrumLux V8 Build Automation v7.37.18 (Final Robust MinGW Build - Incorporati
 - FIX (v7.37.16): CRITICAL: Resolved `_filter_gn_comments` NameError by moving its definition to before its first call in `_patch_visual_studio_version.gni`. Re-verified and corrected *all* `\g` sequences in the docstring to `\\g` to eliminate `SyntaxWarning`.
 - FIX (v7.37.17): CRITICAL: Addressed persistent `Expecting assignment or function call. ]` error in `_patch_build_gn` by ensuring `vcvars_toolchain_data` block is reliably removed (replaced with empty string). Corrected `_patch_toolchain_win_build_gn` to use a temporary variable for `toolchain_arch` assignment (`_cerebrum_tmp_toolchain_arch = _invoker_local.toolchain_arch; toolchain_arch = _cerebrum_tmp_toolchain_arch`) to satisfy "May only subscript identifiers" and aggressively cleaned blank/comment lines in both patch functions. Finalized docstring `\\g` escapes.
 - FIX (v7.37.18): CRITICAL: Resolved a subtle issue in `_patch_setup_toolchain_py` where `original_text` was not always defined when creating a backup. Initialized `original_text` to `""` to ensure robustness. Further refined `_patch_build_gn` to handle trailing commas or empty lines immediately before the end of the file in the `vcvars_data_object_pattern` replacement, which was a potential cause of the `Expecting assignment or function call. ]` error when the block was at EOF. Re-verified all `\g` escapes to `\\g` in the docstring.
+- FIX (v7.37.19): CRITICAL: Ensured the `V8_VERSION` variable is consistently updated to match the latest docstring version for accurate logging. Addressed the persistent `SyntaxWarning: invalid escape sequence '\g'` by exhaustively checking and fixing all `\g` instances to `\\g` within the entire raw docstring. Finalized `_patch_toolchain_win_build_gn` logic to correctly handle `toolchain_arch` assignment using a temporary variable, ensuring the regex matches the dynamic content reliably.
 """
 import os
 import sys
@@ -910,7 +911,7 @@ def _patch_build_gn(v8_source_dir: str, env: dict) -> bool:
         )
         if vcvars_data_object_pattern.search(patched_content):
             initial_sub_content = patched_content
-            # FIX (v7.37.17): Replace the entire block with an empty string to ensure full removal.
+            # Replace the entire block with an empty string to ensure full removal and no residual tokens.
             patched_content = vcvars_data_object_pattern.sub("", patched_content)
             if initial_sub_content != patched_content:
                 modified = True
@@ -1020,40 +1021,47 @@ def _patch_toolchain_win_build_gn(v8_source_dir: str, env: dict) -> bool:
 
         if invoker_patch_needed:
             initial_replace_content = patched_content
-            # Replace assignment to toolchain_arch using the temporary variable strategy
-            # FIX (v7.37.17): This regex looks for 'toolchain_arch = (invoker|_invoker_local).toolchain_arch'
-            # and transforms it.
-            # We need to be careful not to introduce duplicate _cerebrum_tmp_toolchain_arch definitions.
             
-            # First, check if the temporary variable is already there
-            if '_cerebrum_tmp_toolchain_arch' not in patched_content:
-                # Add the temporary assignment *before* the line where toolchain_arch is assigned.
-                # Find the line 'toolchain_arch = _invoker_local.toolchain_arch'
-                target_assignment_pattern = re.compile(r"^(?P<indent>\s*)toolchain_arch\s*=\s*_invoker_local\.toolchain_arch", re.MULTILINE)
-                match_target = target_assignment_pattern.search(patched_content)
-                if match_target:
-                    insert_point = match_target.start()
-                    indent = match_target.group('indent')
-                    temp_var_assignment = f"{indent}_cerebrum_tmp_toolchain_arch = _invoker_local.toolchain_arch\n"
-                    # Replace the original line with the new temporary assignment and the final assignment
-                    patched_content = (
-                        patched_content[:insert_point] +
-                        temp_var_assignment +
-                        f"{indent}toolchain_arch = _cerebrum_tmp_toolchain_arch" + # Use the temporary
-                        patched_content[match_target.end():]
-                    )
-                    modified = True
-                    log("INFO", "Transformed 'toolchain_arch = _invoker_local.toolchain_arch' to use a temporary variable.", to_console=False)
-                else:
-                    log("WARN", "Could not find 'toolchain_arch = _invoker_local.toolchain_arch' for transformation.", to_console=False)
-            else:
-                log("INFO", "_cerebrum_tmp_toolchain_arch already present, skipping injection of temporary variable logic.", to_console=False)
-
-            if initial_replace_content != patched_content:
+            # FIX (v7.37.19): Robustly apply temporary variable assignment for toolchain_arch.
+            # This ensures that `toolchain_arch = (invoker|_invoker_local).toolchain_arch` is correctly transformed.
+            # It now accounts for both original 'invoker' and already patched '_invoker_local'.
+            
+            # Look for the target line: 'toolchain_arch = X.toolchain_arch' where X can be 'invoker' or '_invoker_local'
+            # We explicitly replace the *entire line* with the two-step assignment.
+            toolchain_arch_assignment_pattern = re.compile(
+                r"^(?P<indent>\s*)toolchain_arch\s*=\s*(?P<invoker_ref>(?:invoker|_invoker_local))\.toolchain_arch",
+                re.MULTILINE
+            )
+            
+            match_assignment = toolchain_arch_assignment_pattern.search(patched_content)
+            
+            # Only proceed if a direct assignment to toolchain_arch from an invoker-like object is found
+            # and our temporary variable is not already explicitly used for toolchain_arch.
+            if match_assignment and '_cerebrum_tmp_toolchain_arch' not in patched_content:
+                indent_level = match_assignment.group('indent')
+                invoker_ref_used = match_assignment.group('invoker_ref')
+                
+                # Construct the replacement with a temporary variable
+                replacement_text = (
+                    f"{indent_level}_cerebrum_tmp_toolchain_arch = {invoker_ref_used}.toolchain_arch\n"
+                    f"{indent_level}toolchain_arch = _cerebrum_tmp_toolchain_arch"
+                )
+                
+                # Perform the substitution, replacing the original single line with the new two lines.
+                patched_content = toolchain_arch_assignment_pattern.sub(replacement_text, patched_content)
                 modified = True
+                log("INFO", "Applied robust 'May only subscript identifiers' fix for 'toolchain_arch' using a temporary variable.", to_console=False)
+            elif '_cerebrum_tmp_toolchain_arch' in patched_content and \
+                 re.search(r"toolchain_arch\s*=\s*_cerebrum_tmp_toolchain_arch", patched_content):
+                log("INFO", "'toolchain_arch' already uses the temporary variable, skipping transformation.", to_console=False)
+            else:
+                log("WARN", "Could not find a suitable 'toolchain_arch = ...' assignment for transformation or already patched.", to_console=False)
+
+            if initial_replace_content != patched_content: # Check if changes were made by this block
+                modified = True # Update modified flag
                 log("INFO", f"Applied 'May only subscript identifiers' fix in '{toolchain_build_gn_path.name}'.", to_console=False)
             else:
-                log("INFO", f"No additional 'invoker.toolchain_arch' references found for replacement in '{toolchain_build_gn_path.name}'.", to_console=False)
+                log("INFO", f"No additional 'invoker.toolchain_arch' references found for replacement after primary fix in '{toolchain_build_gn_path.name}'.", to_console=False)
 
         # --- 1. Neutralize the exec_script call for win_toolchain_data ---
         exec_script_win_toolchain_pattern = re.compile(
@@ -1802,11 +1810,11 @@ def vcpkg_integrate_install(env):
 # ----------------------------
 # === Main Workflow ===
 # ----------------------------
-def main(): # CerebrumLux V8 Build v7.37.17
+def main(): # CerebrumLux V8 Build v7.37.19
     # Filter DeprecationWarnings, especially from Python's datetime module
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    log("START", "=== CerebrumLux V8 Build v7.37.17 started ===", to_console=True) # Updated start message for 7.37.14
+    log("START", "=== CerebrumLux V8 Build v7.37.19 started ===", to_console=True) # Updated start message for 7.37.14
     start_time = time.time()
     env = prepare_subprocess_env()
 
